@@ -1,0 +1,35 @@
+{
+  "capturedAt": "2026-07-28T15:40:56.8424234+03:00",
+  "reason": "server_startup",
+  "document": {
+    "name": "",
+    "fullName": "",
+    "saved": false
+  },
+  "variables": {
+    "DWGNAME": null,
+    "DWGPREFIX": null,
+    "INSUNITS": null,
+    "LUNITS": null,
+    "CLAYER": null,
+    "TILEMODE": null,
+    "EXTMIN": null,
+    "EXTMAX": null
+  },
+  "entityCounts": {},
+  "layers": [],
+  "boundedEntityCount": 0,
+  "previewPath": null,
+  "screenshotPath": null,
+  "visualContext": {
+    "source": "AutoCAD window",
+    "layout": "",
+    "viewPreset": "SWISO",
+    "zoomedExtents": true,
+    "visibleModelEntityCount": 0,
+    "selectedModelEntityCount": 0,
+    "width": null,
+    "height": null
+  },
+  "contextFile": "C:\\Users\\Public\\Documents\\Vectric Files\\Gadgets\\VCarve Pro V12.5\\LayerDSL_Toolpaths\\layer-dsl-toolpaths\\.autocad-mcp\\latest-context.json"
+}

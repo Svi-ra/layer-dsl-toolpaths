@@ -102,6 +102,13 @@ function Helper.tools_json()
       "rate_units": "mm_min"
     },
     {
+      "id": 5, "name": "V-Bit 90 degree", "type": "vbit", "units": "mm",
+      "diameter": 12.0, "included_angle": 90.0, "tool_number": 5,
+      "stepdown": 3.0, "stepover": 4.0, "clear_stepover": 3.5,
+      "feed_rate": 150.0, "plunge_rate": 50.0, "spindle_speed": 16000,
+      "rate_units": "mm_min"
+    },
+    {
       "id": 9, "name": "No Feeds", "type": "end_mill", "units": "mm",
       "diameter": 6.0, "tool_number": 9,
       "stepdown": 2.0, "stepover": 2.4,

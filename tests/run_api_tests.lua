@@ -256,6 +256,21 @@ do -- finishing forces zero allowance
    eq("profile-finish/allowance zeroed", profile.Allowance, 0.0)
 end
 
+do -- a V-bit profile without explicit side runs on the vector, not outside
+   local r = build("Profile_tool_5_depth_2.7")
+   assert_clean_api("profile-vbit-default-on")
+   check("profile-vbit-default-on/created", r.id ~= nil, tostring(r.err))
+   eq("profile-vbit-default-on/no mismatch warning", #r.warnings, 0)
+
+   local profile = Mock.written(Mock.last("ProfileParameterData"))
+   eq("profile-vbit-default-on/side on", profile.ProfileSide,
+      "ProfileParameterData.PROFILE_ON")
+
+   local selector = Mock.written(Mock.last("GeometrySelector"))
+   eq("profile-vbit-default-on/selects open", selector.SelectOpen, true)
+   eq("profile-vbit-default-on/selects closed", selector.SelectClosed, true)
+end
+
 ---------------------------------------------------------------------------
 -- 3. Drill
 ---------------------------------------------------------------------------

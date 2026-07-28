@@ -337,7 +337,7 @@ do
       local db, db_err = fresh.database.open(fresh.config.new(root), nil)
       check("readonly2/opens", db ~= nil, tostring(db_err))
       if db then
-         eq("readonly2/reads the real library", db.tools:count(), 5)
+         eq("readonly2/reads the real library", db.tools:count(), 6)
          local tool = db.tools:find_by_name("End Mill 12mm")
          check("readonly2/finds the user's tool", tool ~= nil, "not found")
          eq("readonly2/uses the user's feed", tool and tool.feed_rate, 180.0)
@@ -359,7 +359,7 @@ end
 do
    local repo, root = Helper.repository("lookup")
 
-   eq("repo/count", repo:count(), 5)
+   eq("repo/count", repo:count(), 6)
 
    local by_id = repo:find_by_id(1)
    check("repo/find_by_id", by_id ~= nil, "id 1 not found")
@@ -388,9 +388,9 @@ do
 
    -- ids and next_id
    local ids = repo:ids()
-   eq("repo/ids count", #ids, 5)
-   eq("repo/ids sorted", ids[1] .. "," .. ids[5], "1,9")
-   eq("repo/next free id", repo:next_id(), 5)
+   eq("repo/ids count", #ids, 6)
+   eq("repo/ids sorted", ids[1] .. "," .. ids[6], "1,9")
+   eq("repo/next free id", repo:next_id(), 6)
 
    Helper.cleanup(root)
 end
@@ -410,7 +410,7 @@ do
       rate_units = "mm_min",
    }
    check("crud/add", added ~= nil, tostring(err))
-   eq("crud/count after add", repo:count(), 6)
+   eq("crud/count after add", repo:count(), 7)
    eq("crud/added is findable", repo:find_by_id(7), added)
    eq("crud/tool_number defaulted", added and added.tool_number, 7)
 
@@ -425,7 +425,7 @@ do
    local auto = repo:add{ name = "Auto", diameter = 1.0,
                           feed_rate = 100, plunge_rate = 50, spindle_speed = 9000 }
    check("crud/auto id", auto ~= nil, "add returned nil")
-   eq("crud/auto id value", auto and auto.id, 5)
+   eq("crud/auto id value", auto and auto.id, 6)
 
    -- duplicate ids are refused
    local dup, dup_err = repo:add{ id = 1, name = "Clash" }

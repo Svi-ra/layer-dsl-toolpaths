@@ -30,7 +30,19 @@ return {
       }
       note(w)
       if tool == nil then return nil, err, warnings end
-      note(Tooling.check_tool_type(record, params.tool, "end_mill", "profile"))
+
+      local explicit = params.explicit or {}
+      local record_type = tostring(record and record.type or "end_mill"):lower()
+      local side_token = params.side
+      local selection_token = params.vector_selection
+      if record_type == "vbit" and not explicit.side then
+         side_token = "on"
+         if not explicit.vector_selection then
+            selection_token = "all"
+         end
+      else
+         note(Tooling.check_tool_type(record, params.tool, "end_mill", "profile"))
+      end
 
       ------------------------------------------------------------------
       -- Profile parameters
@@ -40,7 +52,7 @@ return {
       profile.StartDepth = params.start_depth
       profile.CutDepth   = params.depth
 
-      local side, w1 = Enums.profile_side(params.side)
+      local side, w1 = Enums.profile_side(side_token)
       note(w1)
       profile.ProfileSide = side
 
@@ -61,7 +73,7 @@ return {
          profile.TabLength    = params.tab_width
          profile.TabThickness = params.tab_height
          profile.Use3dTabs    = true
-         if params.side == "on" then
+         if side_token == "on" then
             note("tabs on a 'profile on' toolpath are ignored by VCarve")
          end
       end
@@ -111,7 +123,7 @@ return {
       leads.DoLeadOut = has_out
 
       if has_in or has_out then
-         if params.side == "on" then
+         if side_token == "on" then
             note("lead in/out is ignored on a 'profile on' toolpath")
          end
          local ltype, w4 = Enums.lead_type(params.lead_type or "circular")
@@ -131,7 +143,7 @@ return {
       ------------------------------------------------------------------
       local pos      = Tooling.position(params, ctx)
       local selector = Enums.build_selector(
-                          params.layer_name, params.vector_selection, tool.ToolDia)
+                          params.layer_name, selection_token, tool.ToolDia)
 
       local id = ToolpathManager():CreateProfilingToolpath(
                     params.toolpath_name,
@@ -145,7 +157,16 @@ return {
                     ctx.interactive_warnings)
 
       if id == nil then
-         return nil, "VCarve could not calculate the profile toolpath", warnings
+         local hint = "VCarve could not calculate the profile toolpath"
+            .. string.format(
+               " (side=%s, vector_selection=%s, tool=%s, depth=%s).",
+               tostring(side_token),
+               tostring(selection_token),
+               tostring(params.tool),
+               tostring(params.depth))
+            .. " Check that the vectors match the selection and profile side;"
+            .. " for open vectors use side_on_vector_selection_open."
+         return nil, hint, warnings
       end
       return id, nil, warnings
    end,

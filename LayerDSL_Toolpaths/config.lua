@@ -30,11 +30,11 @@ return {
    --     path = "\\\\server\\cnc\\SmartCAM",
    ---------------------------------------------------------------------------
    database = {
-      path = "\\\\Desktop-0rne27t\\c\\SmartCAM",
+      path = "C:\\SmartCAM",
 
-      -- Let the SMARTCAM_DB environment variable override `path`, so a
-      -- workshop can repoint several seats without editing this file on each.
-      use_environment = true,
+      -- Keep this installed VCarve gadget tied to the local SmartCAM database.
+      -- Set this to true only if SMARTCAM_DB should deliberately override it.
+      use_environment = false,
    },
 
    ---------------------------------------------------------------------------
