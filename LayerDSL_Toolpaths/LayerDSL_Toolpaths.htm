@@ -1,0 +1,130 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+"http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+<title>Layer DSL Toolpaths</title>
+<!--
+   Element ids used from LayerDSL_Toolpaths.lua:
+
+     GadgetVersion   label   version string
+     PlanSummary     label   "n toolpath(s) to create, m skipped"
+     PlanTable       html    plan table, via dialog:SetInnerHtml
+     DryRun          check   build nothing, just report
+     CreatePreviews  check   create 2D preview vectors
+     ShowWarnings    check   let VCarve show its own warnings
+     ButtonOK        button  VCarve wires these two by id; do not rename
+     ButtonCancel    button
+
+   Styling stays deliberately plain (tables, no flexbox) because the dialog
+   is hosted in an embedded browser control, not a modern standalone browser.
+-->
+<style type="text/css">
+<!--
+   body {
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      color: #1c1c1c;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 12px 14px;
+   }
+   h1 { font-size: 15px; font-weight: bold; margin: 0 0 2px 0; }
+   p.sub { color: #666666; margin: 0 0 10px 0; }
+
+   div.panel {
+      background: #ffffff;
+      border: 1px solid #d0d0d0;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+   }
+   div.summary { font-weight: bold; margin-bottom: 6px; }
+
+   /* Plan table is injected by the gadget via SetInnerHtml("PlanTable"). */
+   div.scroll { height: 260px; overflow-y: auto; overflow-x: hidden; }
+
+   table.plan { border-collapse: collapse; width: 100%; font-size: 11px; }
+   table.plan th {
+      text-align: left;
+      font-weight: bold;
+      border-bottom: 1px solid #cccccc;
+      padding: 3px 6px;
+      background: #fafafa;
+   }
+   table.plan td {
+      padding: 3px 6px;
+      border-bottom: 1px solid #eeeeee;
+      vertical-align: top;
+   }
+   table.plan td.op     { font-weight: bold; white-space: nowrap; }
+   table.plan td.layer  { font-family: Consolas, "Courier New", monospace; }
+   table.plan td.detail { color: #444444; }
+   table.plan tr.is-skipped td { color: #999999; }
+
+   .skip  { color: #b06000; font-style: italic; }
+   .warn  { color: #b06000; }
+   .empty { color: #666666; font-style: italic; margin: 4px 0; }
+
+   div.opt { margin: 4px 0; }
+   div.hint { color: #666666; font-size: 11px; margin: 2px 0 6px 20px; }
+
+   code {
+      font-family: Consolas, "Courier New", monospace;
+      background: #eeeeee;
+      padding: 0 3px;
+   }
+   .version { color: #999999; font-size: 11px; }
+   .FormButton { font-family: inherit; font-size: 12px; width: 100%; padding: 3px 0; }
+-->
+</style>
+</head>
+
+<body>
+
+<h1>Layer DSL Toolpaths</h1>
+<p class="sub">
+   Toolpaths built from layer names such as <code>Pocket|tool=6|depth=8</code>.
+</p>
+
+<div class="panel">
+   <div class="summary"><span id="PlanSummary">Reading layers&hellip;</span></div>
+   <div class="scroll"><div id="PlanTable"></div></div>
+</div>
+
+<div class="panel">
+   <div class="opt">
+      <input type="checkbox" name="DryRun" id="DryRun">
+      <label for="DryRun">Dry run &mdash; report what would be built, create nothing</label>
+   </div>
+
+   <div class="opt">
+      <input type="checkbox" name="CreatePreviews" id="CreatePreviews">
+      <label for="CreatePreviews">Create 2D toolpath previews in the 2D view</label>
+   </div>
+
+   <div class="opt">
+      <input type="checkbox" name="ShowWarnings" id="ShowWarnings">
+      <label for="ShowWarnings">Let VCarve show its own warnings while calculating</label>
+   </div>
+   <div class="hint">
+      Turn this off for unattended runs so no dialog blocks the batch.
+   </div>
+</div>
+
+<table width="100%" border="0">
+   <tr>
+      <td width="40%" class="version">Version <span id="GadgetVersion">0.0</span></td>
+      <td width="10%">&nbsp;</td>
+      <td width="25%">
+         <input name="ButtonOK" type="button" class="FormButton"
+                id="ButtonOK" value="Create Toolpaths">
+      </td>
+      <td width="25%">
+         <input name="ButtonCancel" type="button" class="FormButton"
+                id="ButtonCancel" value="Cancel">
+      </td>
+   </tr>
+</table>
+
+</body>
+</html>
