@@ -80,13 +80,27 @@ function Enums.rate_units(token)
 end
 
 --- Tool type by name, used by the operation modules.
+--[[
+| The eight tool types VCarve can CREATE from Lua.
+|
+| Tool(name, type) accepts exactly these; the documentation lists two more
+| (FORM_TOOL, LASER) that can be read back from an existing toolpath but
+| cannot be constructed, so they are deliberately absent.
+|
+| Keep this in step with VALID_TYPES in lib/db/tool_repository.lua. A type
+| the repository accepts but this cannot build would silently become an end
+| mill, which is exactly the class of quiet wrongness this gadget avoids.
+]]
 function Enums.tool_type(name)
    return pick({
-      end_mill     = Tool.END_MILL,
-      ball_nose    = Tool.BALL_NOSE,
-      vbit         = Tool.VBIT,
-      through_drill= Tool.THROUGH_DRILL,
-      engraving    = Tool.ENGRAVING,
+      end_mill           = Tool.END_MILL,
+      ball_nose          = Tool.BALL_NOSE,
+      radiused_end_mill  = Tool.RADIUSED_END_MILL,
+      vbit               = Tool.VBIT,
+      engraving          = Tool.ENGRAVING,
+      radiused_engraving = Tool.RADIUSED_ENGRAVING,
+      through_drill      = Tool.THROUGH_DRILL,
+      diamond_drag       = Tool.DIAMOND_DRAG,
    }, name, "end_mill", "tool type")
 end
 

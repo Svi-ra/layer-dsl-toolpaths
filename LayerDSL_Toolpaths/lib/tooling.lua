@@ -182,6 +182,13 @@ function Tooling.build_tool(record, note)
    tool.SpindleSpeed = tonumber(record.spindle_speed) or 0
    tool.ToolNumber   = tonumber(record.tool_number) or tonumber(record.id) or 1
 
+   -- Notes travel with the tool into the toolpath, so a note about a cutter
+   -- is visible where it matters. Guarded: the property only exists from
+   -- VCarve Pro 7.015 onwards.
+   if type(record.notes) == "string" and record.notes ~= "" then
+      pcall(function() tool.Notes = record.notes end)
+   end
+
    return tool
 end
 

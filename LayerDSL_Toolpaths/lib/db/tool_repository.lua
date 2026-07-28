@@ -255,10 +255,57 @@ end
 -- validation
 ---------------------------------------------------------------------------
 
+--[[
+| The tool types VCarve can create from Lua. Must match Enums.tool_type in
+| lib/enums.lua: a type accepted here but not buildable there would quietly
+| become an end mill.
+|
+| `angle` and `radius` record which geometry field the type cannot work
+| without, taken from the Vectric API documentation:
+|
+|   VBit_Angle    - V-Bit, Diamond Drag and Engraving tools
+|   Tip_Radius    - Radiused Engraving and Radiused End Mill tools
+|   Flat_Diameter - Engraving tools (optional; 0 means a sharp point)
+|   Line_Width    - Diamond Drag tools (optional)
+]]
 local VALID_TYPES = {
-   end_mill = true, ball_nose = true, vbit = true, engraving = true,
-   through_drill = true, radiused_end_mill = true, radiused_engraving = true,
+   end_mill           = {},
+   ball_nose          = {},
+   radiused_end_mill  = { radius = true },
+   vbit               = { angle = true },
+   engraving          = { angle = true },
+   radiused_engraving = { angle = true, radius = true },
+   through_drill      = {},
+   diamond_drag       = { angle = true },
 }
+
+--- The tool types this database accepts, sorted. Used by the docs and tests.
+function ToolRepository.valid_types()
+   local names = {}
+   for name in pairs(VALID_TYPES) do names[#names + 1] = name end
+   table.sort(names)
+   return names
+end
+
+--[[
+| Feed rate units, matching Enums.rate_units in lib/enums.lua.
+|
+| Validated rather than defaulted, because getting this wrong is dangerous
+| in a way the other fields are not: a feed of 220 read as mm/sec instead of
+| mm/min is sixty times too fast, and nothing downstream would question it.
+]]
+local VALID_RATE_UNITS = {
+   mm_sec = true, mm_min = true, m_min = true,
+   in_sec = true, in_min = true, ft_min = true,
+}
+
+--- The feed rate units this database accepts, sorted.
+function ToolRepository.valid_rate_units()
+   local names = {}
+   for name in pairs(VALID_RATE_UNITS) do names[#names + 1] = name end
+   table.sort(names)
+   return names
+end
 
 --- Check a record well enough to refuse a dangerous toolpath.
 --
@@ -275,9 +322,13 @@ function ToolRepository.validate(tool)
       end
    end
 
-   if tool.type ~= nil and not VALID_TYPES[tostring(tool.type)] then
+   local kind  = tostring(tool.type or "end_mill")
+   local needs = VALID_TYPES[kind]
+
+   if tool.type ~= nil and needs == nil then
       problems[#problems + 1] = string.format(
-         "unknown tool type %q", tostring(tool.type))
+         "unknown tool type %q (expected one of: %s)",
+         kind, table.concat(ToolRepository.valid_types(), ", "))
    end
 
    require_positive("diameter",      "diameter")
@@ -285,13 +336,34 @@ function ToolRepository.validate(tool)
    require_positive("plunge_rate",   "plunge_rate")
    require_positive("spindle_speed", "spindle_speed")
 
-   if tostring(tool.type) == "vbit" then
+   -- Geometry each type cannot do without. A V-bit with no angle, or a
+   -- radiused cutter with no radius, is not the tool the name claims.
+   if needs and needs.angle then
       local angle = tonumber(tool.included_angle)
       if angle == nil or angle <= 0 or angle >= 180 then
          problems[#problems + 1] = string.format(
-            "included_angle must be between 0 and 180 for a V-bit (%s)",
-            tostring(tool.included_angle))
+            "included_angle must be between 0 and 180 for a %s tool (%s)",
+            kind, tostring(tool.included_angle))
       end
+   end
+
+   if needs and needs.radius then
+      local radius = tonumber(tool.tip_radius)
+      if radius == nil or radius <= 0 then
+         problems[#problems + 1] = string.format(
+            "tip_radius must be greater than 0 for a %s tool (%s)",
+            kind, tostring(tool.tip_radius))
+      end
+   end
+
+   -- A misspelt unit would otherwise fall back to mm_sec and cut sixty
+   -- times too fast, so it is an error rather than a warning.
+   if tool.rate_units ~= nil
+      and not VALID_RATE_UNITS[tostring(tool.rate_units)] then
+      problems[#problems + 1] = string.format(
+         "unknown rate_units %q (expected one of: %s)",
+         tostring(tool.rate_units),
+         table.concat(ToolRepository.valid_rate_units(), ", "))
    end
 
    return problems
