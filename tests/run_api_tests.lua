@@ -271,6 +271,20 @@ do -- a V-bit profile without explicit side runs on the vector, not outside
    eq("profile-vbit-default-on/selects closed", selector.SelectClosed, true)
 end
 
+do -- experimental Moulding object path
+   local r = build("Moulding_tool_11_profile_layer_mouldingprofile")
+   assert_clean_api("moulding")
+   check("moulding/created", r.id ~= nil, tostring(r.err))
+
+   local call = Mock.only_created()
+   eq("moulding/right add method", call.method, "AddToolpath")
+   eq("moulding/add argument count", call.argc, 1)
+
+   local tool = Mock.written(Mock.last("Tool"))
+   eq("moulding/tool type", Mock.last("Tool").__type, "Tool.BALL_NOSE")
+   eq("moulding/tool diameter", tool.ToolDia, 8.0)
+end
+
 ---------------------------------------------------------------------------
 -- 3. Drill
 ---------------------------------------------------------------------------

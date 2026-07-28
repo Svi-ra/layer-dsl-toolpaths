@@ -289,6 +289,8 @@ do -- multi-token operation aliases
    eq("dxf/v_carve operation", parse("v_carve_tool_60").operation, "VCarve")
    eq("dxf/v_carve tool",      parse("v_carve_tool_60").tool,      60)
    eq("dxf/cutout alias",      parse("cutout_tool_6_depth_8").operation, "Profile")
+   eq("dxf/moulding operation", parse("Moulding_tool_11_profile_layer_mouldingprofile").operation, "Moulding")
+   eq("dxf/moulding profile layer", parse("Moulding_tool_11_profile_layer_mouldingprofile").profile_layer, "mouldingprofile")
 end
 
 do -- unknown parameters still warn without stopping

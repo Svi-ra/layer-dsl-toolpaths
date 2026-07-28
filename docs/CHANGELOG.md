@@ -211,6 +211,110 @@ Verification:
 - Result: 767 passed, 0 failed.
 - Added regression coverage confirming implicit V-bit Profile layers select both open and closed vectors.
 
+## 2026-07-28 - Add Moulding Reference Analysis And Probe
+
+Files changed:
+
+- `tools/moulding_probe/MouldingProbe.lua`
+- `tools/moulding_probe/README.md`
+- `docs/MOULDING-REFERENCE-2026-07-28.md`
+- `docs/CHANGELOG.md`
+
+Reason:
+
+- A manual VCarve file `C:\Users\Victor\Desktop\1233123.crv` and DXF exports
+  were provided as references for adding Moulding Toolpath support.
+- Direct implementation would be risky because the VCarve API name list exposes
+  `MouldingToolpath` and `uiMouldingToolpathForm`, but no clear
+  `CreateMouldingToolpath` constructor.
+
+What was done:
+
+- Inspected `14.dxf` and recorded the rail/profile layers and geometry counts.
+- Inspected `1233123.crv` as a proprietary OLE/Compound Document and confirmed
+  it contains `Swept Profile 1`, `uiExtrudedToolpathForm` and `Ball Nose (8 mm)`.
+- Inspected `fa123.dxf` and recorded that it only contains the exterior contour.
+- Added a safe `MouldingProbe.lua` gadget that reads existing saved toolpath
+  metadata from an open VCarve job and writes a report.
+
+What failed or was uncertain:
+
+- `.crv` is not plain text and cannot be fully decoded without VCarve's own API.
+- `fa123.dxf` does not include the rail/profile geometry.
+- It is still unknown whether VCarve allows creating a new Moulding Toolpath
+  directly from Lua.
+
+Final decision:
+
+- Run the probe on the manual `.crv` reference before adding Moulding to the
+  main Layer DSL operation list.
+
+Verification:
+
+- Pending: run `MouldingProbe.lua` inside VCarve with `1233123.crv` open.
+
+## 2026-07-28 - Add Experimental Moulding DSL Operation
+
+Files changed:
+
+- `LayerDSL_Toolpaths/lib/schema.lua`
+- `LayerDSL_Toolpaths/lib/factory.lua`
+- `LayerDSL_Toolpaths/lib/ops/moulding.lua`
+- `LayerDSL_Toolpaths/config.lua`
+- `tests/db_helper.lua`
+- `tests/mock_vectric.lua`
+- `tests/run_tests.lua`
+- `tests/run_api_tests.lua`
+- `tests/run_db_tests.lua`
+- `C:\SmartCAM\tools.json`
+- `C:\Users\Victor\Desktop\fa124_layerdsl_moulding.dxf`
+- `docs/CHANGELOG.md`
+
+Reason:
+
+- `fa124.dxf` contains all required geometry for the Moulding test: exterior
+  contour, 36 rail vectors and a profile/section layer.
+- The project needs a first DSL-aligned Moulding attempt that can be run the
+  same way as the existing operations.
+
+What was done:
+
+- Added operation aliases `Moulding`, `Molding`, `sweep` and `swept`.
+- Added parameter `profile_layer`.
+- Added default Moulding config: `vector_selection = "open"` and
+  `profile_layer = "mouldingprofile"`.
+- Added `ops/moulding.lua` using the experimental
+  `MouldingToolpath` + `ToolpathManager:AddToolpath` path exposed by VCarve's
+  API name list.
+- Added SmartCAM tool `id = 11`, `Ball Nose 8mm`, for the Moulding reference.
+- Created `C:\Users\Victor\Desktop\fa124_layerdsl_moulding.dxf`:
+  - rail layer renamed to `Moulding_tool_11_profile_layer_mouldingprofile`
+  - profile layer renamed to `mouldingprofile`
+
+What failed or was uncertain:
+
+- Local tests can confirm API names and argument shape, but cannot prove VCarve
+  will calculate a real Moulding Toolpath.
+- VCarve exposes `MouldingToolpath` but no documented
+  `CreateMouldingToolpath`; this first implementation is therefore
+  experimental.
+- Properties `RailSelector` and `ProfileSelector` were rejected by the API-name
+  tests and were removed.
+
+Final decision:
+
+- Keep the implementation isolated as a normal `Moulding` operation and test it
+  in VCarve with the renamed DXF before expanding the feature further.
+
+Verification:
+
+- Ran `tools/run_tests.py` with the bundled Codex Python.
+- Result: 782 passed, 0 failed.
+- VCarve test failed with: `variable 'MouldingToolpath' is not declared`.
+- Updated `ops/moulding.lua` to detect the missing global with `rawget(_G, ...)`
+  and report a controlled error instead of an internal crash.
+- Reran `tools/run_tests.py`; result: 782 passed, 0 failed.
+
 ## 2026-07-28 - Point Installed Gadget To Reviewed SmartCAM Database
 
 Files changed:

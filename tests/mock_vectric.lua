@@ -153,6 +153,7 @@ function Mock.install(api_names, opts)
    VCarveParameterData = class_with_constants("VCarveParameterData", {})
    GeometrySelector    = class_with_constants("GeometrySelector", {})
    ToolpathPosData     = class_with_constants("ToolpathPosData", {})
+   MouldingToolpath    = class_with_constants("MouldingToolpath", {})
 
    ------------------------------------------------------------------
    -- MaterialBlock
@@ -215,6 +216,13 @@ function Mock.install(api_names, opts)
       manager.ToolpathWithNameExists = function() return false end
       manager.GetHeadPosition        = function() return nil end
       manager.DeleteToolpath         = function() return true end
+      manager.AddToolpath = function(_, ...)
+         local args = { ... }
+         local call = { method = "AddToolpath", argc = select("#", ...),
+                        toolpath = args[1], flag = args[2] }
+         Mock.created[#Mock.created + 1] = call
+         return "uuid-" .. #Mock.created
+      end
 
       return manager
    end)

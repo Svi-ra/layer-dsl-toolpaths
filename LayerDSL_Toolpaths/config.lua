@@ -197,5 +197,10 @@ return {
          -- mill that clears it, e.g. VCarve_tool_3_flat_3_flat_tool_1
          strategy   = "offset",
       },
+
+      Moulding = {
+         vector_selection = "open",
+         profile_layer    = "mouldingprofile",
+      },
    },
 }

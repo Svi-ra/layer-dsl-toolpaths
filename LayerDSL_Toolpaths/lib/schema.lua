@@ -104,6 +104,10 @@ Schema.OPERATIONS = {
    v_carve = "VCarve",
    carve   = "VCarve",
    engrave = "VCarve",
+   moulding = "Moulding",
+   molding  = "Moulding",
+   sweep    = "Moulding",
+   swept    = "Moulding",
 }
 
 ---------------------------------------------------------------------------
@@ -173,6 +177,11 @@ Schema.PARAMS = {
    {  key = "vector_selection", type = "enum", values = VECTOR_SELECTION,
       aliases = { "vectors", "select", "selection" },
       doc = "Which vectors on the layer to machine: closed open all circles." },
+
+   {  key = "profile_layer", type = "string",
+      applies_to = { Moulding = true },
+      aliases = { "profile", "section_layer", "section" },
+      doc = "Layer containing the Moulding cross-section profile." },
 
    -- ---- Z clearance ------------------------------------------------------
    {  key = "safe_z", type = "number", min = 0,

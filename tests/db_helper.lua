@@ -109,6 +109,13 @@ function Helper.tools_json()
       "rate_units": "mm_min"
     },
     {
+      "id": 11, "name": "Ball Nose 8mm", "type": "ball_nose", "units": "mm",
+      "diameter": 8.0, "tool_number": 11,
+      "stepdown": 3.0, "stepover": 2.0,
+      "feed_rate": 150.0, "plunge_rate": 50.0, "spindle_speed": 16000,
+      "rate_units": "mm_min"
+    },
+    {
       "id": 9, "name": "No Feeds", "type": "end_mill", "units": "mm",
       "diameter": 6.0, "tool_number": 9,
       "stepdown": 2.0, "stepover": 2.4,

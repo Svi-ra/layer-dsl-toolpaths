@@ -48,7 +48,7 @@ end
 --- Load and register the standard operation set.
 -- @param lib_path directory holding lib/, with a trailing separator
 function Factory.load_standard(lib_path)
-   for _, file in ipairs{ "pocket", "profile", "drill", "vcarve" } do
+   for _, file in ipairs{ "pocket", "profile", "drill", "vcarve", "moulding" } do
       Factory.register(dofile(lib_path .. "ops/" .. file .. ".lua"))
    end
    return Factory
