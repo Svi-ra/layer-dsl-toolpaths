@@ -129,9 +129,21 @@ return {
       ------------------------------------------------------------------
       -- Position, geometry selection, and creation
       ------------------------------------------------------------------
-      local pos      = Tooling.position(params, ctx)
+      local pos = Tooling.position(params, ctx)
+
+      -- "profile on" is the one side that makes sense on OPEN vectors (a
+      -- cut-along-the-line pass down an open path), unlike inside/outside
+      -- which need a closed loop to offset from. The global default only
+      -- selects closed vectors, so without this an "on" profile over open
+      -- geometry silently sees zero vectors and fails to calculate. Only
+      -- kicks in when the layer name did not itself say vector_selection.
+      local vector_selection = params.vector_selection
+      if params.side == "on" and not (params.explicit or {}).vector_selection then
+         vector_selection = "all"
+      end
+
       local selector = Enums.build_selector(
-                          params.layer_name, params.vector_selection, tool.ToolDia)
+                          params.layer_name, vector_selection, tool.ToolDia)
 
       local id = ToolpathManager():CreateProfilingToolpath(
                     params.toolpath_name,
