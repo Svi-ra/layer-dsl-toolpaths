@@ -10,7 +10,9 @@
      GadgetVersion   label   version string
      PlanSummary     label   "n toolpath(s) to create, m skipped"
      PlanTable       html    plan table, via dialog:SetInnerHtml
+     ExistingNote    label   what already carries these names, if anything
      DryRun          check   build nothing, just report
+     ReplaceExisting check   delete same-named toolpaths first (destructive)
      CreatePreviews  check   create 2D preview vectors
      ShowWarnings    check   let VCarve show its own warnings
      ButtonOK        button  VCarve wires these two by id; do not rename
@@ -63,6 +65,7 @@
 
    .skip  { color: #b06000; font-style: italic; }
    .warn  { color: #b06000; }
+   .exists { color: #0060b0; }
    .empty { color: #666666; font-style: italic; margin: 4px 0; }
 
    div.opt { margin: 4px 0; }
@@ -95,6 +98,17 @@
    <div class="opt">
       <input type="checkbox" name="DryRun" id="DryRun">
       <label for="DryRun">Dry run &mdash; report what would be built, create nothing</label>
+   </div>
+
+   <div class="opt">
+      <input type="checkbox" name="ReplaceExisting" id="ReplaceExisting">
+      <label for="ReplaceExisting">Delete existing toolpaths that share a name</label>
+   </div>
+   <div class="hint">
+      <span id="ExistingNote">Nothing in this job carries these names.</span>
+      Only toolpaths on the sheet being machined are replaced; same-named
+      toolpaths belonging to other sheets are left alone and reported.
+      A toolpath that will not say which sheet it belongs to is never deleted.
    </div>
 
    <div class="opt">

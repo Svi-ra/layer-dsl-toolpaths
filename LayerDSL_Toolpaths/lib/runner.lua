@@ -218,6 +218,46 @@ function Runner.check_tools(plan, tools, log)
    return skipped
 end
 
+--- Count the toolpaths already in the job that share each planned name.
+--
+-- Disclosure only: this deletes nothing and decides nothing. It sets
+-- `entry.existing` so the confirmation dialog can say what is already there
+-- before the user commits.
+--
+-- Worth knowing what the count spans: the Lua toolpath list is JOB-wide,
+-- while VCarve's Toolpaths pane shows only the active sheet. In a nested job
+-- the same layer names exist on every sheet, so a non-zero count here usually
+-- means "another sheet already has a toolpath by this name", not "you have
+-- run this before on this sheet". Neither the gadget nor the API can tell
+-- those two apart, which is precisely why the decision is the user's.
+--
+-- @return total number of pre-existing toolpaths matching planned names
+function Runner.survey_existing(plan, manager)
+   manager = manager or ToolpathManager()
+
+   local counts = {}
+   local pos = manager:GetHeadPosition()
+   while pos ~= nil do
+      local toolpath
+      toolpath, pos = manager:GetNext(pos)
+      if toolpath ~= nil and toolpath.Name ~= nil then
+         counts[toolpath.Name] = (counts[toolpath.Name] or 0) + 1
+      end
+   end
+
+   local total = 0
+   for i = 1, #plan do
+      local entry = plan[i]
+      entry.existing = 0
+      if not entry.skipped then
+         entry.existing = counts[entry.params.toolpath_name] or 0
+         total = total + entry.existing
+      end
+   end
+
+   return total
+end
+
 --- Resolve the tools a plan entry uses, for display in the plan table.
 function Runner.annotate_tools(plan, tools)
    for i = 1, #plan do
@@ -232,12 +272,32 @@ end
 -- execute
 ---------------------------------------------------------------------------
 
---- Remove an existing toolpath of the same name, so re-running the gadget
---- refreshes toolpaths instead of stacking duplicates.
-local function delete_existing(manager, name)
-   if not manager:ToolpathWithNameExists(name) then return 0 end
+--- Delete toolpaths carrying this name, on the active sheet only.
+--
+-- Only ever called when the user has explicitly asked to replace.
+--
+-- The toolpath list is JOB-WIDE while a toolpath's name is just the layer name
+-- it came from, and nesting puts the same layer names on every sheet. Matching
+-- on name alone therefore reaches across sheets - that is the bug that deleted
+-- sheet 1's work when the gadget was run on sheet 2.
+--
+-- So when sheet information is available (ctx.sheets, and a sheet that reports
+-- its name) a candidate is only removed if it belongs to the sheet being
+-- machined. A toolpath that will not say which sheet it is on is left alone:
+-- the whole point is to stop deleting things whose ownership is unproven.
+--
+-- Without sheets - an unsheeted job - every toolpath is by definition on the
+-- only sheet there is, and matching by name is exact again.
+local function delete_existing(manager, name, sheets, sheet_name)
+   if not manager:ToolpathWithNameExists(name) then return 0, 0 end
+
+   local function mine(toolpath)
+      if sheets == nil or sheet_name == nil then return true end
+      return sheets:sheet_of(toolpath) == sheet_name
+   end
 
    local removed = 0
+
    -- Re-scan from the head after each delete: the list is mutated underneath
    -- us, so holding a POSITION across a delete is not safe.
    local again = true
@@ -247,7 +307,7 @@ local function delete_existing(manager, name)
       while pos ~= nil do
          local toolpath
          toolpath, pos = manager:GetNext(pos)
-         if toolpath ~= nil and toolpath.Name == name then
+         if toolpath ~= nil and toolpath.Name == name and mine(toolpath) then
             manager:DeleteToolpath(toolpath)
             removed = removed + 1
             again = true
@@ -255,15 +315,39 @@ local function delete_existing(manager, name)
          end
       end
    end
-   return removed
+
+   -- What is left under this name belongs to other sheets. Counted in ONE pass
+   -- once the deleting has finished - counting inside the loop above would
+   -- tally the same survivors again on every re-scan. Reported rather than
+   -- silent: leaving a same-named toolpath in place looks like a bug unless
+   -- the report says it was deliberate.
+   local spared = 0
+   local pos = manager:GetHeadPosition()
+   while pos ~= nil do
+      local toolpath
+      toolpath, pos = manager:GetNext(pos)
+      if toolpath ~= nil and toolpath.Name == name then spared = spared + 1 end
+   end
+
+   return removed, spared
 end
 
 --- Create the toolpaths described by the plan.
+--
+-- Adding to the job is the whole job here: nothing existing is touched unless
+-- the run was explicitly asked to replace (ctx.replace_existing, set from the
+-- dialog; config.gadget.replace_existing is only the default). The gadget is
+-- run once on a fresh project and the G-code is posted straight out, so there
+-- is nothing to reconcile - and guessing wrong about that costs the user
+-- finished toolpaths on another sheet.
 --
 -- @return number created, number failed
 function Runner.execute(plan, config, ctx, log)
    local manager = ToolpathManager()
    local created, failed = 0, 0
+
+   local replace = ctx.replace_existing
+   if replace == nil then replace = config.gadget.replace_existing end
 
    for i = 1, #plan do
       local entry  = plan[i]
@@ -274,13 +358,28 @@ function Runner.execute(plan, config, ctx, log)
       else
          local label = params.layer_name
 
-         if config.gadget.replace_existing then
-            local removed = delete_existing(manager, params.toolpath_name)
+         if replace then
+            local removed, spared = delete_existing(
+               manager, params.toolpath_name, ctx.sheets, ctx.sheet_name)
+
             if removed > 0 then
-               log:info(label, string.format(
-                  "replaced %d existing toolpath(s) named %q",
-                  removed, params.toolpath_name))
+               log:warn(label, string.format(
+                  "deleted %d existing toolpath(s) named %q%s",
+                  removed, params.toolpath_name,
+                  ctx.sheet_name and (" on sheet " .. ctx.sheet_name) or ""))
             end
+            if spared > 0 then
+               log:info(label, string.format(
+                  "left %d toolpath(s) named %q belonging to other sheets alone",
+                  spared, params.toolpath_name))
+            end
+         elseif (entry.existing or 0) > 0 then
+            -- Left in place deliberately. Say so, because two toolpaths with
+            -- one name are confusing enough to be worth a line in the report.
+            log:warn(label, string.format(
+               "%d toolpath(s) named %q already exist and were left alone; "
+               .. "the new one is in addition to them",
+               entry.existing, params.toolpath_name))
          end
 
          local id, err, warnings = Factory.build(params, ctx)
@@ -295,11 +394,85 @@ function Runner.execute(plan, config, ctx, log)
          else
             created = created + 1
             log:info(label, string.format(
-               "created %q (%s, tool %s, depth %.3g)",
+               "created %q (%s, tool %s, depth %.3g)%s",
                params.toolpath_name, params.operation,
-               tostring(params.tool), params.depth or 0))
+               tostring(params.tool), params.depth or 0,
+               ctx.sheet_name and (" on sheet " .. ctx.sheet_name) or ""))
          end
       end
+   end
+
+   return created, failed
+end
+
+--- Create the toolpaths for every sheet in the job, in one run.
+--
+-- Toolpath creation follows the active sheet and cuts only that sheet's
+-- vectors - both measured, not assumed (tools/Sheet_Diagnostics). So one pass
+-- per sheet, over the SAME plan, produces the correct per-sheet toolpaths: the
+-- plan describes what to machine, the active sheet decides which copies of it
+-- get machined.
+--
+-- Two things make this safe rather than merely possible:
+--
+--   * a sheet is only machined once VCarve confirms it is the active one. An
+--     unverified switch would put a sheet's toolpaths on the wrong sheet,
+--     which is worse than not creating them.
+--   * layers with no geometry on the sheet in hand are skipped. The layer
+--     manager is job-wide, so a layer can look populated while holding nothing
+--     for this sheet, and building from no vectors just fails confusingly.
+--
+-- The active sheet is always put back, whatever happens in between.
+--
+-- @param sheets handle from lib/sheets.lua, or nil for an unsheeted job
+-- @return number created, number failed
+function Runner.execute_sheets(plan, config, ctx, log, sheets)
+   if sheets == nil or sheets.count <= 1 then
+      return Runner.execute(plan, config, ctx, log)
+   end
+
+   local created, failed = 0, 0
+
+   for _, sheet in ipairs(sheets:list()) do
+      local switched, why = sheets:activate(sheet)
+
+      if not switched then
+         -- Not fatal for the rest of the job: the other sheets are still worth
+         -- doing, and the report names the one that was missed.
+         failed = failed + 1
+         log:error("", string.format(
+            "sheet %q was skipped entirely: %s", sheet.name, why or "unknown"))
+      else
+         ctx.sheet_name = sheet.name
+
+         local todo = {}
+         for i = 1, #plan do
+            local entry = plan[i]
+            if not entry.skipped then
+               local objects = sheets:objects_on(entry.layer, sheet.name)
+               if objects > 0 then
+                  todo[#todo + 1] = entry
+               else
+                  log:info(entry.params.layer_name, string.format(
+                     "nothing on sheet %q; skipped there", sheet.name))
+               end
+            end
+         end
+
+         log:info("", string.format("sheet %q: %d toolpath(s) to create",
+                                    sheet.name, #todo))
+
+         local made, lost = Runner.execute(todo, config, ctx, log)
+         created = created + made
+         failed  = failed + lost
+      end
+   end
+
+   ctx.sheet_name = nil
+
+   local restored, why = sheets:restore()
+   if not restored then
+      log:warn("", why or "could not restore the active sheet")
    end
 
    return created, failed
@@ -356,6 +529,11 @@ function Runner.plan_to_html(plan)
                  .. esc(table.concat(params.unknown_parameters, ", ")) .. ")</span>"
       end
 
+      if (entry.existing or 0) > 0 then
+         unknown = unknown .. string.format(
+            " <span class='exists'>(%d already named this)</span>", entry.existing)
+      end
+
       rows[#rows + 1] = string.format(
          "<tr class='%s'><td class='op'>%s</td><td class='layer'>%s%s</td>"
          .. "<td class='detail'>%s</td></tr>",
@@ -384,6 +562,11 @@ function Runner.plan_to_text(plan)
          lines[#lines + 1] = string.format(
             "  %-8s %s\r\n           %s",
             params.operation, params.layer_name, Parser.describe(params))
+         if (entry.existing or 0) > 0 then
+            lines[#lines + 1] = string.format(
+               "           (%d toolpath(s) in this job already carry this name)",
+               entry.existing)
+         end
       end
    end
    return table.concat(lines, "\r\n")

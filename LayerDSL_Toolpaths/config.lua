@@ -91,9 +91,22 @@ return {
       --   {index}  1-based plan index
       toolpath_name = "{layer}",
 
-      -- Delete an existing toolpath with the same name before creating a new
-      -- one. Prevents "Toolpath 1", "Toolpath 1 (1)" pile-up on re-runs.
-      replace_existing = true,
+      --[[
+      | Delete existing toolpaths that share a name with one about to be
+      | created. OFF, and only the starting state of the dialog checkbox - the
+      | user has the last word on every run.
+      |
+      | Replacement is scoped to the sheet being machined: a same-named toolpath
+      | belonging to another sheet is left alone and reported, and one that will
+      | not say which sheet it belongs to is never deleted. That is what makes
+      | it safe in a nested job, where every sheet carries the same layer names
+      | and VCarve's Lua toolpath list spans all of them.
+      |
+      | Still off by default, because the intended workflow does not need it:
+      | run the gadget once on a fresh project, post the G-code, and if the DXF
+      | was wrong, re-import into a new project.
+      ]]
+      replace_existing = false,
 
       -- Write a plain-text run report next to the VCarve job file.
       write_report = false,

@@ -1,0 +1,276 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+"http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+<title>Sheet Diagnostics</title>
+<!--
+   Element ids used from Sheet_Diagnostics.lua:
+
+     GadgetVersion   label   version string
+     ReportText      html    the report as <pre> markup, via SetInnerHtml
+     ReportLabel     label   the same report as plain text, via AddLabelField
+     ButtonOK        button  VCarve wires this by id; do not rename
+
+   Why the report arrives by TWO routes
+   ------------------------------------
+   The first attempt injected into a <pre> and a <textarea> with SetInnerHtml,
+   and this VCarve silently did nothing: the dialog opened still showing the
+   placeholder. The one call known to work in this host is the main gadget's -
+   SetInnerHtml of markup into an EMPTY <div> - so ReportText is now exactly
+   that shape, and the text is ALSO sent as a plain label to ReportLabel.
+
+   Whichever route the host honours, the report shows up and can be copied.
+   ReportText is preferred when both arrive, because its content was HTML
+   escaped by Lua and is therefore exact; the label is the safety net. The
+   status line names the route that supplied the text, so a future failure of
+   either one is visible instead of silent.
+
+   Both are styled white-space:pre, so line breaks and indentation survive
+   whichever one is used, and an empty one occupies no space.
+
+   ReportSource is a <textarea> parked off-screen, filled by JavaScript at
+   click time - never by Lua, because a textarea is one of the things
+   SetInnerHtml would not fill. Copying from a textarea is what
+   document.execCommand('copy') needs: its .value is already plain text and it
+   can be focused and selected. Off-screen rather than display:none because a
+   hidden element cannot be selected.
+
+   Clipboard access is layered - see copyReport(). Vectric's Lua API has no
+   text clipboard binding (CopyToClipboard is for vectors) and this build
+   rejects io.open write modes, so the browser control is the only route.
+
+   Styling stays plain (tables, no flexbox): this is an embedded browser
+   control, not a modern standalone browser.
+-->
+<style type="text/css">
+<!--
+   body {
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      color: #1c1c1c;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 10px 12px;
+   }
+   h1 { font-size: 15px; font-weight: bold; margin: 0 0 2px 0; }
+   p.sub { color: #666666; margin: 0 0 8px 0; }
+
+   div.panel {
+      background: #ffffff;
+      border: 1px solid #d0d0d0;
+      padding: 6px 8px;
+      margin-bottom: 8px;
+   }
+   div.scroll { height: 430px; overflow: auto; }
+
+   /* Either carrier renders the report identically. */
+   #ReportText, #ReportLabel {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 11px;
+      white-space: pre;
+      color: #1c1c1c;
+   }
+   #ReportText pre {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 11px;
+      white-space: pre;
+      margin: 0;
+   }
+
+   /* Off-screen, not hidden: a display:none element cannot be selected. */
+   textarea#ReportSource {
+      position: absolute;
+      left: -10000px;
+      top: 0;
+      width: 100px;
+      height: 100px;
+   }
+
+   .status  { color: #666666; }
+   .ok      { color: #007000; font-weight: bold; }
+   .problem { color: #b06000; font-weight: bold; }
+
+   .FormButton { font-family: inherit; font-size: 12px; width: 100%; padding: 3px 0; }
+   .version { color: #999999; font-size: 11px; }
+-->
+</style>
+</head>
+
+<body>
+
+<h1>Sheet Diagnostics</h1>
+<p class="sub">
+   What this VCarve can and cannot do with sheets, measured rather than assumed.
+</p>
+
+<div class="panel">
+   <div class="scroll">
+      <div id="ReportText"></div>
+      <span id="ReportLabel"></span>
+   </div>
+</div>
+
+<textarea id="ReportSource" readonly="readonly" wrap="off"></textarea>
+
+<table width="100%" border="0" cellpadding="0" cellspacing="0">
+   <tr>
+      <td>
+         <span id="CopyStatus" class="problem">Scripting is disabled in this
+         dialog &mdash; click in the report, press Ctrl+A then Ctrl+C.</span>
+      </td>
+   </tr>
+</table>
+
+<table width="100%" border="0" cellpadding="0" cellspacing="4">
+   <tr>
+      <td width="45%" class="version">Version <span id="GadgetVersion">0.0</span></td>
+      <td width="10%">&nbsp;</td>
+      <td width="22%">
+         <input name="ButtonCopy" type="button" class="FormButton"
+                id="ButtonCopy" value="Copy Report" onclick="copyReport();">
+      </td>
+      <td width="23%">
+         <input name="ButtonOK" type="button" class="FormButton"
+                id="ButtonOK" value="Close">
+      </td>
+   </tr>
+</table>
+
+<script type="text/javascript">
+<!--
+/*
+ * Written for the oldest engine VCarve might host: var only, no let/const, no
+ * arrow functions, no template literals.
+ */
+
+function setStatus(message, isProblem) {
+   var status = document.getElementById('CopyStatus');
+   if (!status) { return; }
+   status.className = isProblem ? 'problem' : 'ok';
+   if (typeof status.textContent !== 'undefined') {
+      status.textContent = message;
+   } else {
+      status.innerText = message;
+   }
+}
+
+/* An element's text, whitespace intact, whichever DOM property exists. */
+function textOf(id) {
+   var node = document.getElementById(id);
+   if (!node) { return ''; }
+   if (typeof node.textContent !== 'undefined' && node.textContent !== null) {
+      return node.textContent;
+   }
+   return node.innerText || '';
+}
+
+/*
+ * The report, and where it came from. ReportText wins when both routes
+ * delivered: Lua escaped it, so it is exact. The label is the safety net for
+ * a host that ignores SetInnerHtml - which is exactly what happened once.
+ */
+function reportSource() {
+   var injected = textOf('ReportText');
+   if (injected && injected.replace(/\s/g, '').length > 0) {
+      return { text: injected, from: 'ReportText' };
+   }
+
+   var labelled = textOf('ReportLabel');
+   if (labelled && labelled.replace(/\s/g, '').length > 0) {
+      return { text: labelled, from: 'ReportLabel' };
+   }
+
+   return { text: '', from: 'neither' };
+}
+
+function copyReport() {
+   var found = reportSource();
+   var text  = found.text;
+
+   if (!text || text.length === 0) {
+      setStatus('Nothing to copy - the report did not reach this dialog by '
+                + 'either route (SetInnerHtml or AddLabelField).', true);
+      return;
+   }
+
+   var summary = ' (' + text.length + ' characters via ' + found.from + ')';
+
+   /*
+    * Say something before trying anything. Paths 1 and 2 are synchronous and
+    * overwrite this before it is painted, but path 3 resolves later, and
+    * without this the button would sit silent in between - which reads as a
+    * dead button. Measured in a Chromium host, where the status did not change
+    * for the whole round trip.
+    */
+   setStatus('Copying ' + text.length + ' characters...', false);
+
+   /* The textarea is filled here, not by Lua: SetInnerHtml will not fill it. */
+   var source = document.getElementById('ReportSource');
+   if (source) {
+      try { source.value = text; } catch (ignored0) { }
+   }
+
+   /*
+    * 1. IE / MSHTML. Synchronous, needs no selection, and takes a report of
+    *    any size in one call - so it is tried first.
+    */
+   try {
+      if (window.clipboardData && window.clipboardData.setData) {
+         if (window.clipboardData.setData('Text', text) !== false) {
+            setStatus('Report copied to clipboard.' + summary, false);
+            return;
+         }
+      }
+   } catch (ignored) { }
+
+   /* 2. Select the off-screen textarea and copy the selection. */
+   try {
+      if (source && document.execCommand) {
+         source.focus();
+         source.select();
+         var copied = document.execCommand('copy');
+         if (window.getSelection) {
+            try { window.getSelection().removeAllRanges(); } catch (ignored2) { }
+         }
+         if (copied) {
+            setStatus('Report copied to clipboard.' + summary, false);
+            return;
+         }
+      }
+   } catch (ignored3) { }
+
+   /* 3. The modern asynchronous API: it reports its own outcome. */
+   try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+         navigator.clipboard.writeText(text).then(
+            function () {
+               setStatus('Report copied to clipboard.' + summary, false);
+            },
+            function (error) {
+               setStatus('Clipboard unavailable (' + error
+                         + ') - click in the report, press Ctrl+A then Ctrl+C.',
+                         true);
+            });
+         return;
+      }
+   } catch (ignored4) { }
+
+   setStatus('Clipboard unavailable in this dialog - click in the report, '
+             + 'press Ctrl+A then Ctrl+C.', true);
+}
+
+/*
+ * The status line starts out saying scripting is disabled. If this runs, it was
+ * not - so the message is replaced, which makes the line a self-test.
+ *
+ * It cannot report the character count yet: Lua injects the report AFTER the
+ * page loads, so at this moment both carriers are still empty. The count comes
+ * with the copy.
+ */
+setStatus('Ready. Click Copy Report to copy the whole report.', false);
+//-->
+</script>
+
+</body>
+</html>

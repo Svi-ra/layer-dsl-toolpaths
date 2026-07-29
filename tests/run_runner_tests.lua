@@ -75,7 +75,91 @@ local function modules()
    }
    return {
       tooling = Tooling, factory = Factory, runner = Runner, db = DbMods,
+      sheets = dofile(LIB .. "sheets.lua"),
    }
+end
+
+---------------------------------------------------------------------------
+-- A job with sheets, shaped like the real one
+--
+-- Faithful to what tools/Sheet_Diagnostics measured on VCarve 12.5:
+--   * sheet ids are opaque and CANNOT be compared - no __eq, no IsEqual - so
+--     anything that matches them by identity must fail here too
+--   * GetSheetIds returns an ITERATOR, not a table
+--   * the layer manager is JOB-WIDE: every layer lists the objects of every
+--     sheet, and each object records its own sheet
+---------------------------------------------------------------------------
+
+--- @param sheet_names array of names, first one active
+-- @param layer_specs array of { name = ..., objects = { "Sheet 1", ... } }
+local function sheet_job(sheet_names, layer_specs)
+   local ids = {}
+   for i, name in ipairs(sheet_names) do
+      -- A fresh table per id, and deliberately no __eq: comparing two of these
+      -- is always false, exactly as the real binding behaves.
+      ids[i] = { __sheet = name }
+   end
+
+   local function id_named(name)
+      for i, sheet in ipairs(sheet_names) do
+         if sheet == name then return ids[i] end
+      end
+      return nil
+   end
+
+   local manager = {
+      ActiveSheetId  = ids[1],
+      NumberOfSheets = #ids,
+      GetSheetName = function(_, id)
+         if type(id) == "table" and id.__sheet then return id.__sheet end
+         error("No matching overload found: GetSheetName(UUID const&)", 0)
+      end,
+      GetSheetIds = function()
+         local i = 0
+         return function()
+            i = i + 1
+            return ids[i]
+         end
+      end,
+   }
+
+   local layers = {}
+   for i, spec in ipairs(layer_specs) do
+      local objects = {}
+      for j, sheet_name in ipairs(spec.objects or {}) do
+         objects[j] = { SheetId = id_named(sheet_name) }
+      end
+
+      layers[i] = {
+         Name          = spec.name,
+         IsSystemLayer = false,
+         IsBitmapLayer = false,
+         Visible       = spec.visible ~= false,
+         GetHeadPosition = function() return #objects > 0 and 1 or nil end,
+         GetNext = function(_, pos)
+            local object = objects[pos]
+            if pos >= #objects then return object, nil end
+            return object, pos + 1
+         end,
+      }
+   end
+
+   local job = {
+      Exists       = true,
+      InMM         = true,
+      SheetManager = manager,
+      LayerManager = {
+         GetHeadPosition = function() return #layers > 0 and 1 or nil end,
+         GetNext = function(_, pos)
+            local layer = layers[pos]
+            if pos >= #layers then return layer, nil end
+            return layer, pos + 1
+         end,
+      },
+      Refresh2DView = function() end,
+   }
+
+   return job, manager
 end
 
 --- Job context wired to the tool repository, as main() builds it.
@@ -332,29 +416,15 @@ do
 end
 
 ---------------------------------------------------------------------------
--- 5. re-running replaces toolpaths instead of duplicating them
+-- 5. existing toolpaths are surveyed and reported, never deleted unasked
+--
+-- The multi-sheet regression lives here. Toolpaths are named after their
+-- layer, and after nesting the same layer names exist on every sheet, so
+-- name-matched deletion on a sheet-2 run destroys sheet 1's finished
+-- toolpaths. A run must ADD unless the user explicitly asked otherwise.
 ---------------------------------------------------------------------------
 
-do
-   install()
-   Mock.seed_existing_toolpaths{ "Pocket_tool_1_depth_8", "Pocket_tool_1_depth_8" }
-   local m = modules()
-
-   local job = Mock.job{ { name = "Pocket_tool_1_depth_8" } }
-   local log = Log.new()
-   local ctx = context(m, job)
-
-   local plan = m.runner.plan(job, config_with{ replace_existing = true }, ctx, log)
-   local created = m.runner.execute(plan, config_with{ replace_existing = true },
-                                    ctx, log)
-
-   eq("replace/created one", created, 1)
-   eq("replace/deleted both duplicates", #Mock.deleted, 2)
-   check("replace/logged the replacement",
-         log:to_text("info"):find("replaced 2") ~= nil, log:to_text("info"))
-end
-
-do -- replace_existing = false leaves them alone
+do -- the shipped default deletes nothing
    install()
    Mock.seed_existing_toolpaths{ "Pocket_tool_1_depth_8" }
    local m = modules()
@@ -362,10 +432,88 @@ do -- replace_existing = false leaves them alone
    local job = Mock.job{ { name = "Pocket_tool_1_depth_8" } }
    local log = Log.new()
    local ctx = context(m, job)
-   local cfg = config_with{ replace_existing = false }
+   local cfg = config_with{}   -- as shipped, no override
 
-   m.runner.execute(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
-   eq("no-replace/nothing deleted", #Mock.deleted, 0)
+   local plan = m.runner.plan(job, cfg, ctx, log)
+   m.runner.survey_existing(plan)
+   local created = m.runner.execute(plan, cfg, ctx, log)
+
+   eq("default/created one", created, 1)
+   eq("default/deleted nothing", #Mock.deleted, 0)
+   check("default/reported what it left alone",
+         log:to_text("warn"):find("left alone", 1, true) ~= nil, log:to_text("warn"))
+end
+
+do -- survey counts every duplicate, and discloses in both renderings
+   install()
+   Mock.seed_existing_toolpaths{
+      "Pocket_tool_1_depth_8", "Pocket_tool_1_depth_8", "Something else" }
+   local m = modules()
+
+   local job = Mock.job{ { name = "Pocket_tool_1_depth_8" } }
+   local ctx = context(m, job)
+   local plan = m.runner.plan(job, config_with{}, ctx, Log.new())
+
+   local total = m.runner.survey_existing(plan)
+   eq("survey/total counts only planned names", total, 2)
+   eq("survey/per entry", plan[1].existing, 2)
+
+   check("survey/shown in the dialog table",
+         m.runner.plan_to_html(plan):find("2 already named this", 1, true) ~= nil,
+         m.runner.plan_to_html(plan))
+   check("survey/shown in the text plan",
+         m.runner.plan_to_text(plan):find("already carry this name", 1, true) ~= nil,
+         m.runner.plan_to_text(plan))
+end
+
+do -- an unsurveyed plan still executes; disclosure is optional, not required
+   install()
+   Mock.seed_existing_toolpaths{ "Pocket_tool_1_depth_8" }
+   local m = modules()
+
+   local job = Mock.job{ { name = "Pocket_tool_1_depth_8" } }
+   local ctx = context(m, job)
+   local cfg = config_with{}
+
+   local created = m.runner.execute(m.runner.plan(job, cfg, ctx, Log.new()),
+                                    cfg, ctx, Log.new())
+   eq("unsurveyed/created one", created, 1)
+   eq("unsurveyed/deleted nothing", #Mock.deleted, 0)
+end
+
+do -- the dialog's choice wins over config.lua, in both directions
+   install()
+   Mock.seed_existing_toolpaths{ "Pocket_tool_1_depth_8", "Pocket_tool_1_depth_8" }
+   local m = modules()
+
+   local job = Mock.job{ { name = "Pocket_tool_1_depth_8" } }
+   local log = Log.new()
+   local ctx = context(m, job)
+   ctx.replace_existing = true
+
+   local cfg = config_with{ replace_existing = false }
+   local plan = m.runner.plan(job, cfg, ctx, log)
+   m.runner.survey_existing(plan)
+   local created = m.runner.execute(plan, cfg, ctx, log)
+
+   eq("opt-in/created one", created, 1)
+   eq("opt-in/deleted both duplicates", #Mock.deleted, 2)
+   check("opt-in/logged the deletion as a warning",
+         log:to_text("warn"):find("deleted 2", 1, true) ~= nil, log:to_text("warn"))
+end
+
+do -- ...and off at the dialog beats on in config.lua
+   install()
+   Mock.seed_existing_toolpaths{ "Pocket_tool_1_depth_8" }
+   local m = modules()
+
+   local job = Mock.job{ { name = "Pocket_tool_1_depth_8" } }
+   local ctx = context(m, job)
+   ctx.replace_existing = false
+
+   local cfg = config_with{ replace_existing = true }
+   m.runner.execute(m.runner.plan(job, cfg, ctx, Log.new()), cfg, ctx, Log.new())
+   eq("opt-out/deleted nothing", #Mock.deleted, 0)
 end
 
 ---------------------------------------------------------------------------
@@ -441,6 +589,206 @@ do
 
    check("escape/no raw script tag", html:find("<script>") == nil, html)
    check("escape/entities used",     html:find("&lt;script&gt;") ~= nil, html)
+end
+
+---------------------------------------------------------------------------
+-- 9. sheets: reading them, and aiming at one
+---------------------------------------------------------------------------
+
+do -- a job without sheets is simply not a sheeted job
+   install()
+   local m = modules()
+   eq("sheets/no manager -> nil", m.sheets.open(Mock.job{}), nil)
+end
+
+do
+   install()
+   local m = modules()
+   local job, manager = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Pocket_tool_1_depth_8", objects = { "Sheet 1", "Sheet 2", "Sheet 2" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   check("sheets/opened", sheets ~= nil, "nil handle")
+   eq("sheets/counted", sheets.count, 2)
+   eq("sheets/iterator drained", #sheets:list(), 2)
+   eq("sheets/named in order", sheets:list()[2].name, "Sheet 2")
+   eq("sheets/active read", sheets:active_name(), "Sheet 1")
+
+   -- Switching is verified by NAME, because ids cannot be compared at all.
+   local ok = sheets:activate(sheets:list()[2])
+   check("sheets/activate reports success", ok, "activate returned false")
+   eq("sheets/activate really switched", sheets:active_name(), "Sheet 2")
+
+   eq("sheets/restore returns to the original", (function()
+      sheets:restore()
+      return sheets:active_name()
+   end)(), "Sheet 1")
+
+   -- Per-sheet geometry, the thing the layer manager will not tell you.
+   local layer = job.LayerManager:GetNext(1)
+   eq("sheets/objects on sheet 1", sheets:objects_on(layer, "Sheet 1"), 1)
+   eq("sheets/objects on sheet 2", sheets:objects_on(layer, "Sheet 2"), 2)
+   eq("sheets/objects on a sheet that is not there",
+      sheets:objects_on(layer, "Sheet 9"), 0)
+
+   -- A switch VCarve does not honour must be reported, never assumed.
+   manager.GetSheetName = function() return "Sheet 1" end
+   local moved, why = sheets:activate(sheets:list()[2])
+   check("sheets/unhonoured switch is caught", not moved, "activate claimed success")
+   check("sheets/and says why", (why or ""):find("Sheet 2", 1, true) ~= nil,
+         tostring(why))
+end
+
+---------------------------------------------------------------------------
+-- 10. one run, every sheet
+---------------------------------------------------------------------------
+
+do -- a toolpath per sheet, from one plan
+   install()
+   local m = modules()
+   local job = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Pocket_tool_1_depth_8", objects = { "Sheet 1", "Sheet 2" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   local plan = m.runner.plan(job, cfg, ctx, log)
+   local created, failed = m.runner.execute_sheets(plan, cfg, ctx, log, sheets)
+
+   eq("all-sheets/created one per sheet", created, 2)
+   eq("all-sheets/none failed", failed, 0)
+   eq("all-sheets/two calls to VCarve", #Mock.created, 2)
+   eq("all-sheets/active sheet restored", sheets:active_name(), "Sheet 1")
+   check("all-sheets/report names the sheets",
+         log:to_text("info"):find('sheet "Sheet 2"', 1, true) ~= nil,
+         log:to_text("info"))
+end
+
+do -- a layer with nothing on a sheet is skipped THERE, not everywhere
+   install()
+   local m = modules()
+   local job = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Pocket_tool_1_depth_8", objects = { "Sheet 1" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   local created = m.runner.execute_sheets(
+      m.runner.plan(job, cfg, ctx, log), cfg, ctx, log, sheets)
+
+   eq("sparse/built only where there is geometry", created, 1)
+   check("sparse/said so", log:to_text("info"):find("nothing on sheet", 1, true) ~= nil,
+         log:to_text("info"))
+end
+
+do -- one unreachable sheet does not cost the others
+   install()
+   local m = modules()
+   local job, manager = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Pocket_tool_1_depth_8", objects = { "Sheet 1", "Sheet 2" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   -- Sheet 2 refuses to become active.
+   local names = manager.GetSheetName
+   manager.GetSheetName = function(self, id)
+      local name = names(self, id)
+      return name == "Sheet 2" and "Sheet 1" or name
+   end
+
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+   local created, failed = m.runner.execute_sheets(
+      m.runner.plan(job, cfg, ctx, log), cfg, ctx, log, sheets)
+
+   eq("unreachable/still built the reachable sheet", created, 1)
+   eq("unreachable/counted the failure", failed, 1)
+   check("unreachable/named the skipped sheet",
+         log:to_text("error"):find("skipped entirely", 1, true) ~= nil,
+         log:to_text("error"))
+end
+
+do -- an unsheeted job takes the old path unchanged
+   install()
+   local m = modules()
+   local job = Mock.job{ { name = "Pocket_tool_1_depth_8" } }
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   local created = m.runner.execute_sheets(
+      m.runner.plan(job, cfg, ctx, log), cfg, ctx, log, nil)
+   eq("unsheeted/built once", created, 1)
+end
+
+---------------------------------------------------------------------------
+-- 11. replacement is scoped to the sheet being machined
+--
+-- The original bug: running on sheet 2 deleted sheet 1's finished toolpaths,
+-- because the toolpath list is job-wide and the names are identical.
+---------------------------------------------------------------------------
+
+do
+   install()
+   local m = modules()
+   local job = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Pocket_tool_1_depth_8", objects = { "Sheet 1", "Sheet 2" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   local list = sheets:list()
+
+   -- Two toolpaths, one per sheet, sharing a name - which VCarve allows.
+   Mock.seed_existing_toolpaths{ "Pocket_tool_1_depth_8", "Pocket_tool_1_depth_8" }
+
+   -- Give each one a sheet, the way a real toolpath carries SheetId.
+   local manager = ToolpathManager()
+   local pos, index = manager:GetHeadPosition(), 0
+   while pos ~= nil do
+      local toolpath
+      toolpath, pos = manager:GetNext(pos)
+      index = index + 1
+      toolpath.SheetId = list[index] and list[index].id or list[1].id
+   end
+
+   local log, ctx = Log.new(), context(m, job)
+   ctx.sheets           = sheets
+   ctx.sheet_name       = "Sheet 2"
+   ctx.replace_existing = true
+
+   local cfg  = config_with{}
+   local plan = m.runner.plan(job, cfg, ctx, log)
+   m.runner.execute(plan, cfg, ctx, log)
+
+   eq("scoped-replace/removed only this sheet's", #Mock.deleted, 1)
+   check("scoped-replace/left the other sheet alone",
+         log:to_text("info"):find("belonging to other sheets", 1, true) ~= nil,
+         log:to_text("info"))
+end
+
+do -- a toolpath that will not say which sheet it is on is never deleted
+   install()
+   local m = modules()
+   local job = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Pocket_tool_1_depth_8", objects = { "Sheet 1" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   Mock.seed_existing_toolpaths{ "Pocket_tool_1_depth_8" }   -- no SheetId set
+
+   local log, ctx = Log.new(), context(m, job)
+   ctx.sheets           = sheets
+   ctx.sheet_name       = "Sheet 1"
+   ctx.replace_existing = true
+
+   local cfg = config_with{}
+   m.runner.execute(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("unattributed/not deleted", #Mock.deleted, 0)
 end
 
 ---------------------------------------------------------------------------

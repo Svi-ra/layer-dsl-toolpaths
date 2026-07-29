@@ -25,6 +25,7 @@
 |     lib/factory.lua   dictionary dispatch on params.operation
 |     lib/ops/*.lua     one module per operation
 |     lib/runner.lua    scan -> plan -> execute
+|     lib/sheets.lua    the sheets of a nested job, and how to aim at one
 |     lib/db/           the SmartCAM database
 |       config.lua        WHERE the database lives - the only such place
 |       fileio.lua        disk access
@@ -96,6 +97,7 @@ function LoadModules(script_path)
       tool_repository = m.tool_repository,
    }
 
+   m.sheets  = load("sheets")
    m.tooling = load("tooling").init(m.enums, m.coerce, m.tool_repository)
    m.factory = load("factory").init{ enums = m.enums, tooling = m.tooling }
    m.runner  = load("runner").init(m)
@@ -133,6 +135,25 @@ end
 -- confirmation dialog
 ---------------------------------------------------------------------------
 
+--- The headline above the plan table.
+--
+-- The plan is a list of LAYERS, and in a nested job each one is machined on
+-- every sheet that holds any of its vectors - so the number of rows in the
+-- table is not the number of toolpaths that will appear. "Up to", because a
+-- layer with nothing on a given sheet is skipped there.
+function SummaryLine(counts, sheets)
+   local base = string.format("%d toolpath(s) to create, %d layer(s) skipped",
+                              counts.build, counts.skip)
+
+   if sheets ~= nil and sheets.count > 1 then
+      return string.format(
+         "%s - on each of %d sheets, so up to %d toolpaths in all",
+         base, sheets.count, counts.build * sheets.count)
+   end
+
+   return base
+end
+
 --[[
 | Show the plan and let the user confirm. Returns:
 |    true, options   proceed
@@ -142,23 +163,25 @@ end
 | missing or malformed .htm file degrades to "still usable" rather than
 | "gadget is broken".
 ]]
-function ConfirmPlan(script_path, plan, config, modules)
+function ConfirmPlan(script_path, plan, config, modules, sheets)
    local gadget = config.gadget
 
    local options = {
       dry_run              = gadget.dry_run              == true,
       create_2d_previews   = gadget.create_2d_previews   ~= false,
       interactive_warnings = gadget.interactive_warnings ~= false,
+      replace_existing     = gadget.replace_existing     == true,
    }
 
    if gadget.show_dialog == false then
       return true, options
    end
 
-   local counts = { build = 0, skip = 0 }
+   local counts = { build = 0, skip = 0, existing = 0 }
    for i = 1, #plan do
       if plan[i].skipped then counts.skip = counts.skip + 1
       else counts.build = counts.build + 1 end
+      counts.existing = counts.existing + (plan[i].existing or 0)
    end
 
    local ok, proceed, chosen = pcall(function()
@@ -166,13 +189,21 @@ function ConfirmPlan(script_path, plan, config, modules)
       local dialog = HTML_Dialog(false, html_path, 780, 620, g_dialog_title)
 
       dialog:AddLabelField("GadgetVersion", g_version)
-      dialog:AddLabelField("PlanSummary", string.format(
-         "%d toolpath(s) to create, %d layer(s) skipped", counts.build, counts.skip))
+      dialog:AddLabelField("PlanSummary", SummaryLine(counts, sheets))
       dialog:SetInnerHtml("PlanTable", modules.runner.plan_to_html(plan))
 
-      dialog:AddCheckBox("DryRun",         options.dry_run)
-      dialog:AddCheckBox("CreatePreviews", options.create_2d_previews)
-      dialog:AddCheckBox("ShowWarnings",   options.interactive_warnings)
+      -- Stated up front, whether or not the user acts on it: this is the one
+      -- fact that decides whether ticking Replace destroys finished work.
+      dialog:AddLabelField("ExistingNote", counts.existing == 0
+         and "Nothing in this job currently carries these names."
+         or string.format(
+            "%d toolpath(s) already in this job carry names this run will use.",
+            counts.existing))
+
+      dialog:AddCheckBox("DryRun",          options.dry_run)
+      dialog:AddCheckBox("ReplaceExisting", options.replace_existing)
+      dialog:AddCheckBox("CreatePreviews",  options.create_2d_previews)
+      dialog:AddCheckBox("ShowWarnings",    options.interactive_warnings)
 
       if not dialog:ShowDialog() then
          return false, nil
@@ -180,6 +211,7 @@ function ConfirmPlan(script_path, plan, config, modules)
 
       return true, {
          dry_run              = dialog:GetCheckBox("DryRun"),
+         replace_existing     = dialog:GetCheckBox("ReplaceExisting"),
          create_2d_previews   = dialog:GetCheckBox("CreatePreviews"),
          interactive_warnings = dialog:GetCheckBox("ShowWarnings"),
       }
@@ -279,7 +311,20 @@ function main(script_path)
    end
    g_database = database
 
+   --[[
+   | The sheets of a nested job. nil means an unsheeted job or a build with no
+   | sheet API, and every path below then behaves exactly as it did before
+   | sheets were understood at all.
+   ]]
+   local sheets = modules.sheets.open(job)
+   if sheets ~= nil and sheets.count > 1 then
+      log:info("", string.format(
+         "job has %d sheets; toolpaths will be created for all of them",
+         sheets.count))
+   end
+
    local ctx = modules.tooling.context(job)
+   ctx.sheets = sheets
    if ctx.thickness <= 0 then
       DisplayMessageBox("The material block has no thickness.\r\n\r\n"
                         .. "Set the material size before running this gadget.")
@@ -319,6 +364,20 @@ function main(script_path)
    ctx.tools = g_database.tools
    modules.runner.annotate_tools(plan, g_database.tools)
 
+   ------------------------------------------------------------------
+   -- What is already in the job under these names?
+   --
+   -- Read-only, and reported rather than acted on. A failure to survey must
+   -- not stop a run that is only going to ADD toolpaths, so it degrades to
+   -- "unknown" - which the dialog then states as nothing found rather than
+   -- claiming a count it does not have.
+   ------------------------------------------------------------------
+   local surveyed, existing = pcall(modules.runner.survey_existing, plan)
+   if not surveyed then
+      log:warn("", "could not list the existing toolpaths ("
+                   .. tostring(existing) .. ")")
+   end
+
    local unusable = modules.runner.check_tools(plan, g_database.tools, log)
 
    local buildable = 0
@@ -341,13 +400,14 @@ function main(script_path)
    ------------------------------------------------------------------
    -- Confirm
    ------------------------------------------------------------------
-   local proceed, options = ConfirmPlan(script_path, plan, g_config, modules)
+   local proceed, options = ConfirmPlan(script_path, plan, g_config, modules, sheets)
    if not proceed then
       return false
    end
 
    ctx.create_2d_previews   = options.create_2d_previews
    ctx.interactive_warnings = options.interactive_warnings
+   ctx.replace_existing     = options.replace_existing == true
 
    ------------------------------------------------------------------
    -- Execute
@@ -357,7 +417,8 @@ function main(script_path)
    if options.dry_run then
       log:info("", "dry run: " .. #plan .. " layer(s) planned, nothing created")
    else
-      local ran, a, b = pcall(modules.runner.execute, plan, g_config, ctx, log)
+      local ran, a, b = pcall(modules.runner.execute_sheets,
+                              plan, g_config, ctx, log, sheets)
       if not ran then
          DisplayMessageBox("Failed while creating toolpaths.\r\n\r\n" .. tostring(a))
          return false

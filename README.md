@@ -386,6 +386,42 @@ and `empty_layer_is_error`.
 Setting `show_dialog = false` and `interactive_warnings = false` gives a fully
 unattended run.
 
+### Nested jobs: one run covers every sheet
+
+Run the gadget once and it creates the toolpaths for **all** sheets. It walks
+the sheets in order, points VCarve at each one, and builds the plan there:
+
+- A sheet is only machined once VCarve confirms it is the active sheet. An
+  unverified switch would put toolpaths on the wrong sheet, so it is reported
+  as an error and that sheet is skipped rather than guessed at.
+- A layer with no vectors on the sheet in hand is skipped **for that sheet**.
+  The layer manager is job-wide, so a layer can look populated while holding
+  nothing for the sheet being machined.
+- The active sheet you started on is restored at the end.
+- Toolpath names stay equal to layer names on every sheet. VCarve accepts the
+  same toolpath name on different sheets and does not rename them.
+
+Nothing here is assumed about the API — `tools/Sheet_Diagnostics` measured it
+against VCarve Pro 12.5: creation follows `ActiveSheetId` in both directions,
+and each toolpath cuts only its own sheet's vectors (a layer split 6/8 across
+two sheets produced plunge lengths of exactly 36 and 48).
+
+### Existing toolpaths are never deleted unasked
+
+A run **adds** toolpaths. Before the confirmation dialog the gadget counts the
+toolpaths already in the job that carry the names it is about to use, shows
+that count, and marks the affected rows in the plan table — but it deletes
+nothing unless you tick **Delete existing toolpaths that share a name**.
+`replace_existing` in `config.lua` is off by default and only sets the
+starting state of that checkbox.
+
+When you do ask for it, replacement is scoped to the sheet being machined:
+same-named toolpaths belonging to other sheets are left alone and reported,
+and a toolpath that will not say which sheet it belongs to is never deleted.
+This is what the original bug was about — the Lua toolpath list spans every
+sheet while VCarve's Toolpaths pane shows only the active one, so matching on
+name alone reached across sheets and deleted finished work.
+
 ---
 
 ## Extending
