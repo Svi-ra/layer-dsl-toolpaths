@@ -30,7 +30,7 @@ return {
    --     path = "\\\\server\\cnc\\SmartCAM",
    ---------------------------------------------------------------------------
    database = {
-      path = "\\\\Desktop-0rne27t\\c\\SmartCAM",
+      path = "Y:\\CNC\\SmartCAM",
 
       -- Let the SMARTCAM_DB environment variable override `path`, so a
       -- workshop can repoint several seats without editing this file on each.
