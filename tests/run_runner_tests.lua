@@ -162,6 +162,21 @@ local function sheet_job(sheet_names, layer_specs)
    return job, manager
 end
 
+--- A job whose layers are listed in DXF order - the order they must be
+--- machined in, and so the order the plan comes back in.
+--
+-- Mock.job takes them in LAYER MANAGER order, and VCarve's manager enumerates
+-- the reverse of the DXF, so the list is flipped on the way in. That keeps
+-- every test below reading naturally: specs[i] corresponds to plan[i].
+--
+-- Section 12 deliberately uses Mock.job directly instead, because proving the
+-- flip happens is the whole point there.
+local function dxf_job(specs)
+   local reversed = {}
+   for i = #specs, 1, -1 do reversed[#reversed + 1] = specs[i] end
+   return Mock.job(reversed)
+end
+
 --- Job context wired to the tool repository, as main() builds it.
 local function context(m, job, repo)
    local ctx = m.tooling.context(job)
@@ -179,7 +194,7 @@ do
    install()
    local m = modules()
 
-   local job = Mock.job{
+   local job = dxf_job{
       { name = "Pocket_tool_1_depth_8" },
       { name = "Layer 1" },                              -- not a DSL layer
       { name = "Profile_side_outside_tool_1_depth_18" },
@@ -209,7 +224,7 @@ do
    install()
    local m = modules()
 
-   local job = Mock.job{
+   local job = dxf_job{
       { name = "Pocket_tool_1_depth_8", objects = 0 },        -- empty
       { name = "Profile_tool_1_depth_8", visible = false },   -- hidden
       { name = "Drill_tool_1_depth_8" },                      -- fine
@@ -328,7 +343,7 @@ end
 do -- a tool missing from tools.json skips its layer; the others still run
    install()
    local m = modules()
-   local job = Mock.job{
+   local job = dxf_job{
       { name = "Pocket_tool_1_depth_8" },
       { name = "Profile_tool_77_depth_8" },   -- no such tool in tools.json
       { name = "Drill_tool_1_depth_8" },
@@ -353,7 +368,7 @@ end
 do -- a tool that exists but has no feeds is refused up front, not at build
    install()
    local m = modules()
-   local job = Mock.job{
+   local job = dxf_job{
       { name = "Pocket_tool_9_depth_8" },   -- tool 9 has zero feeds
       { name = "Pocket_tool_1_depth_8" },
    }
@@ -789,6 +804,109 @@ do -- a toolpath that will not say which sheet it is on is never deleted
    m.runner.execute(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
 
    eq("unattributed/not deleted", #Mock.deleted, 0)
+end
+
+---------------------------------------------------------------------------
+-- 12. machining sequence follows the DXF, not the layer manager
+--
+-- Toolpaths are machined in creation order, and the DXF's layer order is the
+-- sequence the upstream CAM chose. VCarve's layer manager hands layers out in
+-- the REVERSE of that, so Mock.job's list - which is manager order - comes
+-- back flipped in the plan.
+---------------------------------------------------------------------------
+
+do
+   install()
+   local m = modules()
+
+   -- As the layer manager enumerates them: C, B, A.
+   -- As the DXF listed them, and as they must be machined: A, B, C.
+   local job = Mock.job{
+      { name = "Pocket_tool_1_depth_3" },   -- C
+      { name = "Pocket_tool_1_depth_2" },   -- B
+      { name = "Pocket_tool_1_depth_1" },   -- A
+   }
+   local ctx  = context(m, job)
+   local plan = m.runner.plan(job, config_with{}, ctx, Log.new())
+
+   eq("order/first is the DXF's first layer",
+      plan[1].params.layer_name, "Pocket_tool_1_depth_1")
+   eq("order/middle unchanged",
+      plan[2].params.layer_name, "Pocket_tool_1_depth_2")
+   eq("order/last is the DXF's last layer",
+      plan[3].params.layer_name, "Pocket_tool_1_depth_3")
+end
+
+do -- {index} numbers the machining sequence, not the manager's order
+   install()
+   local m = modules()
+   local job = Mock.job{
+      { name = "Pocket_tool_1_depth_3" },
+      { name = "Pocket_tool_1_depth_1" },
+   }
+   local ctx  = context(m, job)
+   local plan = m.runner.plan(job, config_with{ toolpath_name = "{index} {layer}" },
+                              ctx, Log.new())
+
+   eq("order/index follows the sequence",
+      plan[1].params.toolpath_name, "1 Pocket_tool_1_depth_1")
+   eq("order/index counts on",
+      plan[2].params.toolpath_name, "2 Pocket_tool_1_depth_3")
+end
+
+do -- the escape hatch, for a build that enumerates the other way
+   install()
+   local m = modules()
+   local job = Mock.job{
+      { name = "Pocket_tool_1_depth_3" },
+      { name = "Pocket_tool_1_depth_1" },
+   }
+   local ctx  = context(m, job)
+   local plan = m.runner.plan(job, config_with{ layer_order = "vcarve" },
+                              ctx, Log.new())
+
+   eq("order/vcarve keeps the manager's order",
+      plan[1].params.layer_name, "Pocket_tool_1_depth_3")
+end
+
+do -- creation order matches plan order, which is what VCarve machines
+   install()
+   local m = modules()
+   local job = Mock.job{
+      { name = "Pocket_tool_1_depth_3" },
+      { name = "Pocket_tool_1_depth_2" },
+      { name = "Pocket_tool_1_depth_1" },
+   }
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   m.runner.execute(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("order/created 3", #Mock.created, 3)
+   eq("order/built first",  Mock.created[1].name, "Pocket_tool_1_depth_1")
+   eq("order/built second", Mock.created[2].name, "Pocket_tool_1_depth_2")
+   eq("order/built third",  Mock.created[3].name, "Pocket_tool_1_depth_3")
+end
+
+do -- every sheet gets the same sequence
+   install()
+   local m = modules()
+   local job = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Pocket_tool_1_depth_2", objects = { "Sheet 1", "Sheet 2" } },
+      { name = "Pocket_tool_1_depth_1", objects = { "Sheet 1", "Sheet 2" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   m.runner.execute_sheets(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log, sheets)
+
+   eq("order/four toolpaths", #Mock.created, 4)
+   eq("order/sheet 1 first",  Mock.created[1].name, "Pocket_tool_1_depth_1")
+   eq("order/sheet 1 second", Mock.created[2].name, "Pocket_tool_1_depth_2")
+   eq("order/sheet 2 first",  Mock.created[3].name, "Pocket_tool_1_depth_1")
+   eq("order/sheet 2 second", Mock.created[4].name, "Pocket_tool_1_depth_2")
 end
 
 ---------------------------------------------------------------------------

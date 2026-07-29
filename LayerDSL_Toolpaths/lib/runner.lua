@@ -49,6 +49,45 @@ local function layer_has_geometry(layer)
    return layer:GetHeadPosition() ~= nil
 end
 
+--- Every layer in the job, in the order the toolpaths should be built.
+--
+-- Order is not cosmetic here: toolpaths are machined in the order they are
+-- created, and the DXF's layer order IS the machining sequence the CAM
+-- upstream of this gadget decided on. Getting it backwards runs the job
+-- inside out.
+--
+-- Walking VCarve's layer manager head-to-tail produces the REVERSE of the
+-- DXF order, so the walk is reversed to put it back. `layer_order` in
+-- config.lua exists because that is an observed behaviour of VCarve 12.5
+-- rather than a documented guarantee: if a future build enumerates the other
+-- way round, one setting corrects it without touching this file.
+--
+--   "dxf"     first layer in the DXF is machined first        (default)
+--   "vcarve"  whatever order the layer manager hands them out
+--
+-- Either way the result is deterministic: the manager's order is stable, so
+-- the same job always produces the same sequence.
+local function ordered_layers(layer_manager, config)
+   local layers = {}
+
+   local pos = layer_manager:GetHeadPosition()
+   while pos ~= nil do
+      local layer
+      layer, pos = layer_manager:GetNext(pos)
+      if layer ~= nil then layers[#layers + 1] = layer end
+   end
+
+   if (config.gadget.layer_order or "dxf") ~= "vcarve" then
+      -- math.floor, not the // operator: VCarve embeds Lua 5.2, where // is a
+      -- syntax error the test host would happily accept.
+      for i = 1, math.floor(#layers / 2) do
+         layers[i], layers[#layers - i + 1] = layers[#layers - i + 1], layers[i]
+      end
+   end
+
+   return layers
+end
+
 --- Every tool a parameter table refers to, in a stable order.
 --
 -- A reference is an id (number) or a name (string); the repository resolves
@@ -111,12 +150,11 @@ function Runner.plan(job, config, ctx, log)
 
    local scanned, matched = 0, 0
 
-   local pos = layer_manager:GetHeadPosition()
-   while pos ~= nil do
-      local layer
-      layer, pos = layer_manager:GetNext(pos)
+   -- Machining sequence follows this list, so it is settled before anything
+   -- is parsed rather than being whatever order the manager felt like.
+   for _, layer in ipairs(ordered_layers(layer_manager, config)) do
 
-      if layer ~= nil and not layer.IsSystemLayer and not layer.IsBitmapLayer then
+      if not layer.IsSystemLayer and not layer.IsBitmapLayer then
          scanned = scanned + 1
 
          local name = layer.Name

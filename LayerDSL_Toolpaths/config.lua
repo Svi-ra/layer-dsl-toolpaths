@@ -92,6 +92,25 @@ return {
       toolpath_name = "{layer}",
 
       --[[
+      | Machining sequence.
+      |
+      | Toolpaths are machined in the order they are created, and the layer
+      | order in the imported DXF is the sequence the CAM upstream of this
+      | gadget decided on - so it is preserved exactly: first layer in the DXF
+      | becomes the first toolpath, on every sheet.
+      |
+      |   "dxf"     DXF layer order                                (default)
+      |   "vcarve"  the order VCarve's layer manager hands them out
+      |
+      | These are opposites: walking the layer manager head-to-tail gives the
+      | reverse of the DXF order in VCarve 12.5. That is measured behaviour and
+      | not a documented guarantee, which is the only reason this setting
+      | exists - if a build ever enumerates the other way round, switch to
+      | "vcarve" instead of editing the gadget.
+      ]]
+      layer_order = "dxf",
+
+      --[[
       | Delete existing toolpaths that share a name with one about to be
       | created. OFF, and only the starting state of the dialog checkbox - the
       | user has the last word on every run.

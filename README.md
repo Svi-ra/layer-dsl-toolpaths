@@ -386,6 +386,21 @@ and `empty_layer_is_error`.
 Setting `show_dialog = false` and `interactive_warnings = false` gives a fully
 unattended run.
 
+### Machining order follows the DXF
+
+Toolpaths are machined in the order they are created, so the gadget creates
+them in the order the layers appear in the imported DXF: first layer becomes
+the first toolpath, last layer the last. The same sequence is used on every
+sheet of a nested job.
+
+This needs saying because VCarve's layer manager enumerates layers in the
+*reverse* of the DXF order, so the scan is reversed to put it back. That is
+observed behaviour of VCarve 12.5 rather than a documented guarantee, which is
+why `layer_order` in `config.lua` exists — set it to `"vcarve"` to use the
+layer manager's own order if a future build ever enumerates the other way.
+Either setting is deterministic: the same job always produces the same
+sequence.
+
 ### Nested jobs: one run covers every sheet
 
 Run the gadget once and it creates the toolpaths for **all** sheets. It walks
