@@ -19,9 +19,12 @@ local Mock = {}
 
 local API_NAMES   -- injected by Mock.install
 
-Mock.violations = {}   -- property/method names not present in the real API
-Mock.created    = {}   -- toolpath creation calls, in order
-Mock.objects    = {}   -- every mock object created, by class
+Mock.violations   = {}   -- property/method names not present in the real API
+Mock.created      = {}   -- toolpath creation calls, in order
+Mock.objects      = {}   -- every mock object created, by class
+Mock.recalculated = {}   -- ids passed to RecalculateToolpath, in order
+Mock.recalculated_all = {} -- ids swept up by RecalculateAllToolpaths
+Mock.toolpaths    = {}   -- the job's toolpath list, as the manager sees it
 
 local function violation(class, kind, name)
    Mock.violations[#Mock.violations + 1] =
@@ -107,9 +110,11 @@ function Mock.install(api_names, opts)
    API_NAMES = api_names
    opts = opts or {}
 
-   Mock.violations = {}
-   Mock.created    = {}
-   Mock.objects    = {}
+   Mock.violations   = {}
+   Mock.created      = {}
+   Mock.objects      = {}
+   Mock.recalculated = {}
+   Mock.recalculated_all = {}
 
    local thickness = opts.thickness or 18.0
 
@@ -190,6 +195,17 @@ function Mock.install(api_names, opts)
          "pos_data", "selector", "previews", "interactive" },
    }
 
+   --[[
+   | The toolpath LIST, shared by every ToolpathManager() handle - because the
+   | real one is, and the runner takes a fresh handle in several places.
+   |
+   | Modelling it for real is what makes the recalculation route testable: the
+   | runner looks the new toolpath up again after creating it, first by the id
+   | creation returned and then, if the build will not accept that id, by name.
+   | A manager whose list is permanently empty cannot tell those apart.
+   ]]
+   Mock.toolpaths = {}
+
    ToolpathManager = class_with_constants("ToolpathManager", {}, function()
       local manager = {}
 
@@ -208,13 +224,85 @@ function Mock.install(api_names, opts)
                   "%s called with %d arguments, expected %d",
                   method, call.argc, #names)
             end
-            return "uuid-" .. #Mock.created
+
+            local id = "uuid-" .. #Mock.created
+            -- Creation APPENDS, which is the whole basis of the runner's
+            -- "last toolpath of this name is the new one" fallback.
+            Mock.toolpaths[#Mock.toolpaths + 1] = { Name = call.name, __id = id }
+            return id
          end
       end
 
-      manager.ToolpathWithNameExists = function() return false end
-      manager.GetHeadPosition        = function() return nil end
-      manager.DeleteToolpath         = function() return true end
+      manager.ToolpathWithNameExists = function(_, name)
+         for _, t in ipairs(Mock.toolpaths) do
+            if t.Name == name then return true end
+         end
+         return false
+      end
+
+      manager.GetHeadPosition = function()
+         return #Mock.toolpaths > 0 and 1 or nil
+      end
+
+      manager.GetNext = function(_, pos)
+         local toolpath = Mock.toolpaths[pos]
+         if pos >= #Mock.toolpaths then return toolpath, nil end
+         return toolpath, pos + 1
+      end
+
+      manager.DeleteToolpath = function(_, toolpath)
+         for i, t in ipairs(Mock.toolpaths) do
+            if t == toolpath then
+               table.remove(Mock.toolpaths, i)
+               return true
+            end
+         end
+         return false
+      end
+
+      --[[
+      | id -> POSITION -> Toolpath -> recalculate, the documented route. A
+      | POSITION is opaque in VCarve, so an index stands in for one.
+      |
+      | opts.no_find models the build Sheet_Diagnostics measured, where the id
+      | creation returns is NOT the `UUID const&` these take and the call
+      | raises. The runner has to fall back to the name and still get there.
+      |
+      | opts.no_recalculate removes the lot, modelling a build that cannot
+      | recalculate from script at all.
+      ]]
+      if not opts.no_recalculate then
+         for _, name in ipairs{ "Find", "GetAt", "RecalculateToolpath",
+                                "RecalculateAllToolpaths" } do
+            if API_NAMES[name] == nil then
+               violation("ToolpathManager", "method", name)
+            end
+         end
+
+         if not opts.no_find then
+            manager.Find = function(_, id)
+               for i, t in ipairs(Mock.toolpaths) do
+                  if t.__id == id then return i end
+               end
+               return nil
+            end
+            manager.GetAt = function(_, pos) return Mock.toolpaths[pos] end
+         end
+
+         manager.RecalculateToolpath = function(_, toolpath)
+            if opts.recalculate_fails then return false end
+            Mock.recalculated[#Mock.recalculated + 1] = toolpath.__id
+            return true
+         end
+
+         manager.RecalculateAllToolpaths = function()
+            if opts.recalculate_all_fails then return nil end
+            for _, t in ipairs(Mock.toolpaths) do
+               Mock.recalculated_all[#Mock.recalculated_all + 1] = t.__id
+            end
+            return "recalculated " .. #Mock.toolpaths .. " toolpath(s)"
+         end
+      end
 
       return manager
    end)

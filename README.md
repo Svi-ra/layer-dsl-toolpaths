@@ -335,7 +335,7 @@ library behind.
 | `offset` | `overcut`, `overcut_distance` | number (≥0) | Profile | `0.0` | Distance to continue past the start point. |
 | `inside_corner` | `corner_sharpen`, `sharpen_corners` | boolean | Profile | `false` | 3D corner sharpening on internal corners (V-bits only). |
 | `square_corners` | — | boolean | Profile | `false` | Square external corners instead of rounded. |
-| `keep_start_points` | — | boolean | Profile | `false` | Keep vector start points instead of optimising. |
+| `keep_start_points` | — | boolean | Profile | `false` | Keep vector start points instead of optimising. Optimisation only happens because new toolpaths are [recalculated](#new-toolpaths-are-recalculated-and-why-they-have-to-be). |
 | `strategy` | `clearance_strategy`, `pocket_strategy` | `offset` \| `raster` | Pocket, VCarve | `offset` | Area-clearance strategy. |
 | `raster_angle` | — | number | Pocket, VCarve | `0.0` | Raster angle, when `strategy=raster`. |
 | `last_pass` | `profile_pass`, `finish_pass` | `none` \| `first` \| `last` | Pocket, VCarve | `last` | Where the pocket's profile pass runs. `true`→`last`. |
@@ -380,11 +380,79 @@ Config values are coerced through the same schema as layer values, so
 
 `config.gadget` also controls run behaviour: `show_dialog`, `dry_run`,
 `create_2d_previews`, `interactive_warnings`, `toolpath_name` (templated with
-`{layer}`, `{operation}`, `{tool}`, `{depth}`, `{index}`), `replace_existing`
-and `empty_layer_is_error`.
+`{layer}`, `{operation}`, `{tool}`, `{depth}`, `{index}`), `replace_existing`,
+`recalculate` and `empty_layer_is_error`.
 
 Setting `show_dialog = false` and `interactive_warnings = false` gives a fully
 unattended run.
+
+### New toolpaths are recalculated, and why they have to be
+
+Creating a toolpath through VCarve's Lua API is not the same thing as pressing
+**Calculate**. `CreateProfilingToolpath` and its siblings store the parameters
+they are given, but the stage that *acts* on the ones decided during
+calculation does not run. The visible casualty is start point optimisation:
+
+```
+Profile_side_outside_tool_1_depth_18_keep_start_points_false
+```
+
+The toolpath appears, its form correctly reads **Optimize Start Points** — the
+parameter arrived — and the cut still starts at each vector's own start point.
+Select those toolpaths in VCarve, press Calculate, and the start points move.
+No parameter changed in between; only the calculation stage ran.
+
+So the gadget runs it, per toolpath, the moment each one is created. The
+awkward part is getting hold of the toolpath again, and there are **two
+routes** because the documented one may not work on your build:
+
+1. `Find(id)` → `GetAt(pos)`, the documented route.
+2. Failing that, walk the list and take the **last** toolpath carrying the name
+   just used. Creation appends, so that is the new one — and in a nested job
+   the earlier namesakes belong to sheets already machined, so "last" is exact.
+
+Route 2 is not belt-and-braces. `Find` takes `UUID const&`, and
+`tools/Sheet_Diagnostics` already measured on this build that the id creation
+hands back is a *different* bound type which `DeleteToolpathWithId` — same
+parameter type — refuses outright. If `Find` refuses it too, an id-only lookup
+means the recalculation silently never happens.
+
+The object is always looked up fresh, never cached: the API reference is
+explicit that *“the passed toolpath is invalid after this call as a new
+toolpath with the same id is created internally”*.
+
+Recalculation happens immediately rather than in a sweep at the end because a
+toolpath is calculated against the **active sheet**, and a nested-job run walks
+the sheets. Recalculating later, with a different sheet active, is not the same
+operation.
+
+`RecalculateAllToolpaths()` exists as a last resort for a build where the
+per-toolpath route cannot run, and is **off** (`recalculate_all = false`). It
+destroys and rebuilds every toolpath in the job, including work this run never
+touched — too blunt to have happen unasked when the per-toolpath route is known
+to work here. Left off, a run that cannot recalculate says so and the new
+toolpaths need a manual Calculate.
+
+Cost: every toolpath is calculated twice. `recalculate = false` buys that time
+back and hands you the manual Calculate step instead.
+
+### If the start points ever stop being optimised
+
+Run **`tools/Recalc_Diagnostics`**, a throwaway probe in the mould of
+`tools/Sheet_Diagnostics`. It creates two profile toolpaths on one of your
+layers differing *only* in `KeepStartPoints`, compares them, recalculates one,
+compares again, then deletes them all. It separates three things that look
+identical from the outside:
+
+- Does creation act on `KeepStartPoints` at all?
+- Does this build accept the creation id in `Find`? (**it does not**, on 12.5 —
+  which is why route 2 above exists, and why the first version of this fix
+  changed nothing)
+- Does `RecalculateToolpath` move the start points? (**it does**, on 12.5)
+
+If that last answer ever comes back *no*, the gadget cannot fix it from Lua:
+VCarve's UI has three start-point modes and the binding exposes one boolean.
+The probe says so rather than leaving you to guess.
 
 ### Machining order follows the DXF
 
@@ -551,6 +619,14 @@ Documentation* shipped in the V12 Gadget SDK.
   and the four `*ParameterData` classes.
 * Layer enumeration, and that `GeometrySelector` needs
   `GeometryFilterUsed = true` before `OnlyOnLayers` has any effect.
+* `ToolpathManager:RecalculateToolpath`, used to run the calculation stage on
+  each new toolpath — measured on a live 467-vector job, and the reason start
+  points come out optimised without a manual Calculate. `Find` is present but
+  **rejects the id creation returns** on this build, so the toolpath is located
+  by name instead. `ProfileParameterData` carries
+  exactly one start-point control, `KeepStartPoints` — the third UI option
+  ("closest on bounding box") has no Lua binding, which is why the DSL offers
+  only keep-or-optimise.
 * VCarve's embedded Lua exposes only `socket`, `mime` and `ltn12` — no JSON
   and no SQLite — which is why the database is JSON with its own codec.
   `io.open`, `os.execute` and `os.getenv` are all present and are what the
@@ -563,6 +639,9 @@ Documentation* shipped in the V12 Gadget SDK.
   The tests prove the right API is called with the right values; they cannot
   prove VCarve is happy with those values for your geometry. **Run a dry run,
   then check the toolpaths and simulate before cutting.**
+* Recalculation was confirmed on a live job (VCarve Pro 12.5, 467 vectors):
+  start points come out optimised straight after the run, no manual Calculate.
+  It is listed under *verified* above rather than here.
 * Some DSL names in the requested parameter list are ambiguous, so I picked a
   defensible reading and documented it. Change these in `lib/schema.lua` if
   your intent differs:

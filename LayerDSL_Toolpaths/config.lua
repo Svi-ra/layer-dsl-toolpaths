@@ -127,6 +127,47 @@ return {
       ]]
       replace_existing = false,
 
+      --[[
+      | Run VCarve's calculation stage on each toolpath as it is created.
+      |
+      | ON, and it should stay on. Creating a toolpath through the Lua API
+      | stores the parameters but does not run the stage VCarve's Calculate
+      | button runs, so anything decided during calculation is left at its
+      | pre-calculation state. `keep_start_points=false` is the one that shows:
+      | the toolpath form correctly reads "Optimize Start Points", yet the cut
+      | still starts at each vector's own start point until the toolpath is
+      | recalculated. This does that for you, immediately, per toolpath -
+      | exactly what selecting the new toolpaths and pressing Calculate does.
+      |
+      | Only toolpaths THIS run created are touched; nothing else in the job,
+      | on any sheet, is recalculated.
+      |
+      | The cost is calculation time: every toolpath is calculated twice.
+      | Setting this to false buys that time back and hands you the manual
+      | Calculate step instead.
+      ]]
+      recalculate = true,
+
+      --[[
+      | Last-resort fallback for `recalculate`, above.
+      |
+      | If the per-toolpath route cannot run on your build, fall back to
+      | VCarve's own Toolpaths > Recalculate All Toolpaths. That rebuilds
+      | EVERY toolpath in the job, not just the ones this run created, so it
+      | only ever fires when the per-toolpath route produced nothing, and the
+      | report says loudly when it did.
+      |
+      | OFF. The per-toolpath route works on VCarve Pro 12.5 - measured, on a
+      | 467-vector job - so this would only ever fire on a build where that
+      | route broke, and rebuilding every toolpath in the job is too blunt a
+      | thing to have happen unasked. If the per-toolpath route ever does fail,
+      | the run says so and the new toolpaths need a manual Calculate.
+      |
+      | Set to true to allow the fallback, e.g. on a build where the report
+      | says the per-toolpath route could not run.
+      ]]
+      recalculate_all = false,
+
       -- Write a plain-text run report next to the VCarve job file.
       write_report = false,
 

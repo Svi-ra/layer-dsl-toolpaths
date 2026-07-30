@@ -910,6 +910,162 @@ do -- every sheet gets the same sequence
 end
 
 ---------------------------------------------------------------------------
+-- recalculation
+--
+-- Creation stores the parameters; the calculation stage applies the ones that
+-- are decided while calculating. keep_start_points is the visible casualty, so
+-- every created toolpath goes straight back through RecalculateToolpath.
+---------------------------------------------------------------------------
+
+do -- every created toolpath is recalculated, by the id creation returned
+   install()
+   local m = modules()
+   local job = Mock.job{
+      { name = "Profile_side_outside_tool_1_depth_18" },
+      { name = "Pocket_tool_1_depth_8" },
+   }
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   local created = m.runner.execute(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("recalc/two created", created, 2)
+   eq("recalc/two recalculated", #Mock.recalculated, 2)
+   eq("recalc/first by its own id",  Mock.recalculated[1], "uuid-1")
+   eq("recalc/second by its own id", Mock.recalculated[2], "uuid-2")
+   eq("recalc/no warnings", log.counts.warn, 0)
+   eq("recalc/only real API names used", #Mock.violations, 0)
+end
+
+do -- the id route being refused is survivable: fall back to the NAME
+   --
+   -- This is the case that matters most. Sheet_Diagnostics measured that the
+   -- id creation returns is not the `UUID const&` that DeleteToolpathWithId -
+   -- and therefore Find - takes, so on a build that refuses it an id-only
+   -- lookup means the recalculation silently never happens.
+   install{ no_find = true }
+   local m = modules()
+   local job = Mock.job{
+      { name = "Profile_side_outside_tool_1_depth_18" },
+      { name = "Pocket_tool_1_depth_8" },
+   }
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   m.runner.execute(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("recalc/name fallback reached both", #Mock.recalculated, 2)
+   eq("recalc/name fallback found the right one", Mock.recalculated[1], "uuid-1")
+   eq("recalc/name fallback is silent", log.counts.warn, 0)
+end
+
+do -- the LAST toolpath of a name is the new one, not an earlier namesake
+   --
+   -- In a nested job every sheet carries the same layer names, so a lookup
+   -- that took the FIRST match would recalculate sheet 1's toolpath again and
+   -- leave sheet 2's untouched.
+   install{ no_find = true }
+   local m = modules()
+   local job = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Profile_tool_1_depth_18", objects = { "Sheet 1", "Sheet 2" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   m.runner.execute_sheets(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log, sheets)
+
+   eq("recalc/one per sheet by name", #Mock.recalculated, 2)
+   eq("recalc/sheet 1 got its own",  Mock.recalculated[1], "uuid-1")
+   eq("recalc/sheet 2 got its own",  Mock.recalculated[2], "uuid-2")
+end
+
+do -- the whole-job last resort, and what it reports
+   install{ no_recalculate = true }
+   local m = modules()
+
+   local ok, why = m.runner.recalculate_all()
+   eq("recalc_all/missing binding is reported", ok, false)
+   check("recalc_all/names the binding",
+         tostring(why):find("RecalculateAllToolpaths", 1, true) ~= nil, why)
+
+   install()
+   local m2 = modules()
+   local job = Mock.job{ { name = "Profile_tool_1_depth_18" } }
+   local log, ctx = Log.new(), context(m2, job)
+   local cfg = config_with{}
+   m2.runner.execute(m2.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("recalc_all/succeeds when available", m2.runner.recalculate_all(), true)
+   eq("recalc_all/swept the job", #Mock.recalculated_all, 1)
+end
+
+do -- config can turn it off, and then nothing is recalculated
+   install()
+   local m = modules()
+   local job = Mock.job{ { name = "Profile_tool_1_depth_18" } }
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{ recalculate = false }
+
+   m.runner.execute(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("recalc/off means untouched", #Mock.recalculated, 0)
+   eq("recalc/off is silent", log.counts.warn, 0)
+end
+
+do -- a build without the bindings still creates toolpaths, and says so once
+   install{ no_recalculate = true }
+   local m = modules()
+   local job = Mock.job{
+      { name = "Profile_tool_1_depth_18" },
+      { name = "Pocket_tool_1_depth_8" },
+      { name = "Drill_tool_4_depth_20" },
+   }
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   local created, lost = m.runner.execute(
+      m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("recalc/missing binding does not fail creation", created, 3)
+   eq("recalc/missing binding fails nothing", lost, 0)
+   eq("recalc/warned exactly once for the run", log.counts.warn, 1)
+end
+
+do -- VCarve refusing the recalculation is reported, not swallowed
+   install{ recalculate_fails = true }
+   local m = modules()
+   local job = Mock.job{ { name = "Profile_tool_1_depth_18" } }
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   local created = m.runner.execute(
+      m.runner.plan(job, cfg, ctx, log), cfg, ctx, log)
+
+   eq("recalc/refusal still creates", created, 1)
+   eq("recalc/refusal warns", log.counts.warn, 1)
+end
+
+do -- in a nested job each sheet's toolpaths are recalculated on that sheet
+   install()
+   local m = modules()
+   local job = sheet_job({ "Sheet 1", "Sheet 2" }, {
+      { name = "Profile_tool_1_depth_18", objects = { "Sheet 1", "Sheet 2" } },
+   })
+
+   local sheets = m.sheets.open(job)
+   local log, ctx = Log.new(), context(m, job)
+   local cfg = config_with{}
+
+   m.runner.execute_sheets(m.runner.plan(job, cfg, ctx, log), cfg, ctx, log, sheets)
+
+   eq("recalc/one per sheet", #Mock.recalculated, 2)
+   eq("recalc/sheet 1 toolpath", Mock.recalculated[1], "uuid-1")
+   eq("recalc/sheet 2 toolpath", Mock.recalculated[2], "uuid-2")
+end
+
+---------------------------------------------------------------------------
 -- report
 ---------------------------------------------------------------------------
 

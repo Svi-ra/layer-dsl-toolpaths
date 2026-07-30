@@ -424,6 +424,41 @@ function main(script_path)
          return false
       end
       created, failed = a, b
+
+      --[[
+      | Last resort, and only that.
+      |
+      | Creating a toolpath through the Lua API stores its parameters but does
+      | not run the calculation stage - so anything decided while calculating
+      | (keep_start_points above all) stays at its pre-calculation state until
+      | something recalculates. Runner.execute does that per toolpath as each
+      | one is made, which touches nothing else in the job.
+      |
+      | If that could not run at all - the report says why - the only remaining
+      | route is VCarve's own Recalculate All Toolpaths. It rebuilds EVERY
+      | toolpath in the job, including any this run did not create, so it is
+      | announced rather than done quietly and config.gadget.recalculate_all
+      | switches it off for a job holding hand-built toolpaths.
+      ]]
+      if created > 0
+         and ctx.recalculation_warned
+         and (ctx.recalculated or 0) == 0
+         and g_config.gadget.recalculate    ~= false
+         and g_config.gadget.recalculate_all ~= false
+      then
+         local done, why = modules.runner.recalculate_all()
+         if done then
+            log:warn("", "recalculated EVERY toolpath in the job, including any "
+                         .. "this run did not create - the per-toolpath route "
+                         .. "was unavailable. Set gadget.recalculate_all = false "
+                         .. "in config.lua to stop this happening")
+         else
+            log:error("", "the new toolpaths could not be recalculated by any "
+                          .. "route (" .. tostring(why) .. "); select them in "
+                          .. "VCarve and press Calculate before posting G-code")
+         end
+      end
+
       job:Refresh2DView()
    end
 

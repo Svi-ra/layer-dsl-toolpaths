@@ -370,6 +370,158 @@ local function delete_existing(manager, name, sheets, sheet_name)
    return removed, spared
 end
 
+---------------------------------------------------------------------------
+-- recalculation
+---------------------------------------------------------------------------
+
+--[[
+| Why a toolpath is recalculated the moment it is created.
+|
+| CreateProfilingToolpath and its siblings return a toolpath that CARRIES the
+| parameters handed to them but has not been through the calculation stage
+| VCarve's own Calculate button runs. The visible symptom is the profile
+| option `keep_start_points=false`: the toolpath form shows "Optimize Start
+| Points" selected - the parameter did arrive - yet the toolpath still starts
+| at each vector's own start point. Select those toolpaths in VCarve, press
+| Calculate, and the start points move. Nothing about the parameters changed
+| in between; only the calculation stage ran.
+|
+| ToolpathManager:RecalculateToolpath IS that button. From the V12 Lua API
+| reference:
+|
+|    RecalculateToolpath(toolpath) -> bool
+|       "Recalculates passed toolpath. Returns true if toolpath recalculated
+|        ok. The passed toolpath is invalid after this call as a new toolpath
+|        with the same id is created internally."
+|
+| Two things follow from that last sentence, and both shape the code below:
+|
+|   * the toolpath OBJECT cannot be held across the call. The ID can - so the
+|     object is always looked up fresh, never cached.
+|   * RecalculateAllToolpaths() is not the per-toolpath route, because it
+|     destroys and rebuilds every toolpath in the job including finished work
+|     on other sheets this run never touched. It is kept as a LAST RESORT only
+|     (Runner.recalculate_all), for when the per-toolpath route cannot run at
+|     all.
+|
+| Finding the toolpath again: two routes, and the second is not decoration.
+|
+|   Find(id) -> GetAt(pos) is the documented route, and it is tried first.
+|   On VCarve Pro 12.5 it DOES NOT WORK: `Find` takes `UUID const&` and the id
+|   creation hands back is a different bound type, exactly as
+|   tools/Sheet_Diagnostics found for DeleteToolpathWithId. The first version
+|   of this fix used the id alone, and the result was a run that reported
+|   success and changed nothing - the start points stayed unoptimised until the
+|   user pressed Calculate, which is the bug it was meant to fix.
+|
+|   The fallback therefore uses what is definitely comparable: the NAME. The
+|   toolpath just created carries the name just used, and creation appends to
+|   the list, so the LAST toolpath of that name is the new one. That is exact
+|   in a nested job too - the earlier same-named toolpaths belong to sheets
+|   already machined, and they come first.
+|
+| Guarded end to end. If neither route reaches the toolpath, the run reports
+| it rather than quietly producing toolpaths whose settings never took.
+]]
+
+--- The Toolpath object behind an id, if VCarve will accept the id at all.
+local function toolpath_by_id(manager, id)
+   if id == nil then return nil, "creation returned no toolpath id" end
+
+   local found, pos = pcall(function() return manager:Find(id) end)
+   if not found then
+      return nil, "Find rejected the id (" .. tostring(pos) .. ")"
+   end
+   if pos == nil then
+      return nil, "Find matched no toolpath"
+   end
+
+   local got, toolpath = pcall(function() return manager:GetAt(pos) end)
+   if not got or toolpath == nil then
+      return nil, "GetAt failed (" .. tostring(toolpath) .. ")"
+   end
+
+   return toolpath
+end
+
+--- The LAST toolpath in the list carrying this name - the one just created.
+local function toolpath_by_name(manager, name)
+   local match = nil
+
+   local ok, err = pcall(function()
+      local pos = manager:GetHeadPosition()
+      while pos ~= nil do
+         local toolpath
+         toolpath, pos = manager:GetNext(pos)
+         if toolpath ~= nil and toolpath.Name == name then match = toolpath end
+      end
+   end)
+
+   if not ok then
+      return nil, "walking the toolpath list failed (" .. tostring(err) .. ")"
+   end
+   if match == nil then
+      return nil, string.format("no toolpath named %q is in the job", name)
+   end
+
+   return match
+end
+
+--- Run the calculation stage on one just-created toolpath.
+-- @return true | false, reason
+local function recalculate(manager, id, name)
+   local toolpath, why = toolpath_by_id(manager, id)
+
+   if toolpath == nil then
+      local fallback, why2 = toolpath_by_name(manager, name)
+      if fallback == nil then
+         return false, string.format("could not find the new toolpath: %s; %s",
+                                     why, why2)
+      end
+      toolpath = fallback
+   end
+
+   local ok, result = pcall(function()
+      return manager:RecalculateToolpath(toolpath)
+   end)
+
+   if not ok then
+      return false, "ToolpathManager:RecalculateToolpath is unusable ("
+                    .. tostring(result) .. ")"
+   end
+   if result == false then
+      return false, "VCarve declined to recalculate the toolpath"
+   end
+
+   return true
+end
+
+--- Last resort: VCarve's own Toolpaths > Recalculate All Toolpaths.
+--
+-- Only reached when the per-toolpath route could not run at all. It rebuilds
+-- EVERY toolpath in the job, so it is announced in the report rather than done
+-- quietly, and config.gadget.recalculate_all can switch it off for a job that
+-- holds hand-built toolpaths this gadget must not touch.
+--
+-- @return true | false, reason
+function Runner.recalculate_all(manager)
+   manager = manager or ToolpathManager()
+
+   local ok, result = pcall(function()
+      return manager:RecalculateAllToolpaths()
+   end)
+
+   if not ok then
+      return false, "ToolpathManager:RecalculateAllToolpaths is unusable ("
+                    .. tostring(result) .. ")"
+   end
+   if result == nil or result == false then
+      return false, "VCarve declined to recalculate the toolpaths"
+   end
+
+   return true
+end
+
 --- Create the toolpaths described by the plan.
 --
 -- Adding to the job is the whole job here: nothing existing is touched unless
@@ -386,6 +538,11 @@ function Runner.execute(plan, config, ctx, log)
 
    local replace = ctx.replace_existing
    if replace == nil then replace = config.gadget.replace_existing end
+
+   -- On unless config.lua turns it off: without it every profile toolpath
+   -- keeps the vectors' start points no matter what keep_start_points says.
+   local recalculating = config.gadget.recalculate ~= false
+   local recalculated  = 0
 
    for i = 1, #plan do
       local entry  = plan[i]
@@ -436,8 +593,39 @@ function Runner.execute(plan, config, ctx, log)
                params.toolpath_name, params.operation,
                tostring(params.tool), params.depth or 0,
                ctx.sheet_name and (" on sheet " .. ctx.sheet_name) or ""))
+
+            --[[
+            | Immediately, and on this sheet. Recalculation is done here
+            | rather than in one sweep at the end because in a nested job the
+            | run walks the sheets, and a toolpath is calculated against the
+            | ACTIVE sheet - recalculating it later, with a different sheet
+            | active, is not the same operation.
+            ]]
+            if recalculating then
+               local done, why = recalculate(manager, id, params.toolpath_name)
+               if done then
+                  recalculated = recalculated + 1
+                  ctx.recalculated = (ctx.recalculated or 0) + 1
+               elseif not ctx.recalculation_warned then
+                  -- Once per run. The cause is the same for every toolpath,
+                  -- so a line each would bury the rest of the report.
+                  ctx.recalculation_warned = true
+                  log:warn(label, string.format(
+                     "could not run the calculation stage on the new toolpaths "
+                     .. "(%s); settings that only take effect on calculation - "
+                     .. "keep_start_points above all - will not be applied "
+                     .. "until you select the toolpaths in VCarve and press "
+                     .. "Calculate", why))
+               end
+            end
          end
       end
+   end
+
+   if recalculating and created > 0 then
+      log:info("", string.format("recalculated %d of %d new toolpath(s)%s",
+                                 recalculated, created,
+                                 ctx.sheet_name and (" on sheet " .. ctx.sheet_name) or ""))
    end
 
    return created, failed
