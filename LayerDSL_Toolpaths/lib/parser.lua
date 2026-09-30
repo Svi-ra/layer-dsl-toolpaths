@@ -260,11 +260,20 @@ end
 --   enum    the longest run that is a VALID value, so strategy_raster stops
 --           at "raster" instead of swallowing a following raster_angle key
 --   string  greedy up to the next recognised key
+--   flag    one token if it is a true/false word, otherwise NONE: a flag is
+--           on by being named, so split_passes_side_inside must not swallow
+--           "side" as its value
 --   other   exactly one token; numbers and booleans never contain '_'
 --
--- Always at least one token, so a value that happens to share a name with a
--- key (strategy=offset, and `offset` is also a Profile key) still works.
+-- Always at least one token (flags aside), so a value that happens to share a
+-- name with a key (strategy=offset, and `offset` is also a Profile key) still
+-- works.
 local function value_span(tokens, from, spec)
+   if spec.type == "flag" then
+      if from <= #tokens and Coerce.is_boolean_word(tokens[from]) then return 1 end
+      return 0
+   end
+
    if from > #tokens then return 0 end
 
    if spec.type == "enum" then
@@ -366,6 +375,13 @@ local function scan_delimited(raw, separator, assigns, layer_name, log)
       else
          local key, value = split_field(field, assigns)
 
+         -- A bare flag: "Pocket|depth=8|split_passes". With no assignment
+         -- character in it at all, split_field has nothing to split on.
+         if key == nil then
+            local spec = Schema.find(Coerce.normalise_token(field))
+            if spec ~= nil and spec.type == "flag" then key, value = field, "" end
+         end
+
          if key == nil or trim(key) == "" then
             malformed[#malformed + 1] = field
          elseif Coerce.normalise_token(key) == "operation" then
@@ -426,7 +442,9 @@ local function scan_tokens(raw, separator, layer_name, log)
             i = i + 1
          else
             local vspan = value_span(tokens, i, spec)
-            if vspan == 0 then
+            if vspan == 0 and spec.type == "flag" then
+               pairs_out[#pairs_out + 1] = { key, "" }   -- bare flag: on
+            elseif vspan == 0 then
                unmatched[#unmatched + 1] = key   -- key with nothing after it
             else
                pairs_out[#pairs_out + 1] = { key, join(tokens, i, i + vspan - 1) }

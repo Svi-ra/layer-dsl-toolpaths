@@ -180,7 +180,7 @@ function ConfirmPlan(script_path, plan, config, modules, sheets)
    local counts = { build = 0, skip = 0, existing = 0 }
    for i = 1, #plan do
       if plan[i].skipped then counts.skip = counts.skip + 1
-      else counts.build = counts.build + 1 end
+      else counts.build = counts.build + (plan[i].parts or 1) end   -- split_passes
       counts.existing = counts.existing + (plan[i].existing or 0)
    end
 
@@ -362,7 +362,7 @@ function main(script_path)
    -- tool skips its layer rather than machining with invented feeds.
    ------------------------------------------------------------------
    ctx.tools = g_database.tools
-   modules.runner.annotate_tools(plan, g_database.tools)
+   modules.runner.annotate_tools(plan, g_database.tools, ctx.in_mm)
 
    ------------------------------------------------------------------
    -- What is already in the job under these names?

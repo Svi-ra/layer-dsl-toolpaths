@@ -103,6 +103,22 @@ function Coerce.boolean(raw, spec)
    return nil, string.format("expected true/false, got %q", raw)
 end
 
+--- Is this token one of the words Coerce.boolean understands?
+function Coerce.is_boolean_word(raw)
+   local t = normalise_token(unquote(tostring(raw)))
+   return TRUE_WORDS[t] == true or FALSE_WORDS[t] == true
+end
+
+--- A boolean that is switched on by being named at all.
+--
+-- `split_passes` on its own means true, so a layer name can carry it as a bare
+-- word after the values it modifies. An explicit value is still honoured:
+-- `split_passes_false` turns it back off.
+function Coerce.flag(raw, spec)
+   if trim(tostring(raw or "")) == "" then return true end
+   return Coerce.boolean(raw, spec)
+end
+
 function Coerce.string(raw, spec)
    local s = unquote(trim(raw))
    if spec.allow_empty ~= true and s == "" then

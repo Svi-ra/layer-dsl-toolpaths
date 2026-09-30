@@ -11,7 +11,7 @@
 | ------------
 |   key         string  canonical name; the key used in the returned table
 |   type        string  a function name in lib/coerce.lua
-|                       number | integer | boolean | string | enum | switch
+|                       number | integer | boolean | flag | string | enum | switch
 |   aliases     table   other spellings accepted in a layer name
 |   values      table   enum only: accepted spelling -> canonical token
 |   min / max   number  numeric bounds, inclusive
@@ -160,6 +160,12 @@ Schema.PARAMS = {
    {  key = "start_depth", type = "number", min = 0,
       aliases = { "startdepth", "start", "z_start" },
       doc = "Depth below the material surface at which cutting begins." },
+
+   {  key = "split_passes", type = "flag",
+      applies_to = { Profile = true, Pocket = true },
+      aliases = { "split" },
+      doc = "One toolpath per pass: each cuts the tool's full pass depth, "
+         .. "the last whatever remains. A bare flag - no value needed." },
 
    -- ---- general machining ------------------------------------------------
    {  key = "cut_direction", type = "enum", values = CUT_DIRECTION,

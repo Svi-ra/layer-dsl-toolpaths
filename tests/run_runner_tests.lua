@@ -1066,6 +1066,130 @@ do -- in a nested job each sheet's toolpaths are recalculated on that sheet
 end
 
 ---------------------------------------------------------------------------
+-- split passes
+--
+-- VCarve spreads a cut evenly over its passes. A layer flagged split_passes
+-- becomes one toolpath per pass instead, each the tool's full pass depth and
+-- the last whatever is left. Tool 2 has a 3 mm pass depth.
+---------------------------------------------------------------------------
+
+--- Run one job; returns created, failed, log.
+local function run_split(layers, prepare)
+   install()
+   local m = modules()
+   local job = dxf_job(layers)
+   local log, ctx = Log.new(), context(m, job)
+   if prepare then prepare(ctx) end
+   local cfg = config_with{}
+   local plan = m.runner.plan(job, cfg, ctx, log)
+   m.runner.annotate_tools(plan, ctx.tools, ctx.in_mm)
+   m.runner.survey_existing(plan)
+   local created, lost = m.runner.execute(plan, cfg, ctx, log)
+   return created, lost, log, plan, m
+end
+
+do -- 8 mm with a 3 mm tool: 0-3, 3-6, 6-8
+   local created, lost, log, plan =
+      run_split{ { name = "Profile_tool_2_depth_8_split_passes" } }
+
+   eq("split/three toolpaths", created, 3)
+   eq("split/none failed", lost, 0)
+   eq("split/plan knows the count", plan[1].parts, 3)
+
+   local c = Mock.created
+   eq("split/first starts at the surface", c[1].profile_data.StartDepth, 0)
+   eq("split/first cuts the pass depth",   c[1].profile_data.CutDepth, 3)
+   eq("split/second starts where the first ended", c[2].profile_data.StartDepth, 3)
+   eq("split/second cuts the pass depth",  c[2].profile_data.CutDepth, 3)
+   eq("split/last starts at 6",            c[3].profile_data.StartDepth, 6)
+   eq("split/last cuts what remains",      c[3].profile_data.CutDepth, 2)
+
+   eq("split/name 1", c[1].name, "Profile_tool_2_depth_8_split_passes [1 of 3]")
+   eq("split/name 3", c[3].name, "Profile_tool_2_depth_8_split_passes [3 of 3]")
+
+   eq("split/each one recalculated", #Mock.recalculated, 3)
+   eq("split/no warnings", log.counts.warn, 0)
+   eq("split/only real API names used", #Mock.violations, 0)
+end
+
+do -- the user's case: pass depth 12, depth 19 -> 12 then 7
+   run_split{ { name = "Profile_tool_2_depth_19_pass_depth_12_split_passes" } }
+
+   eq("split/two toolpaths", #Mock.created, 2)
+   eq("split/12 first", Mock.created[1].profile_data.CutDepth, 12)
+   eq("split/then from 12", Mock.created[2].profile_data.StartDepth, 12)
+   eq("split/7 more", Mock.created[2].profile_data.CutDepth, 7)
+end
+
+do -- a start depth carries through, and pockets split the same way
+   run_split{ { name = "Pocket_tool_2_depth_5_start_depth_4_split_passes" } }
+
+   eq("split/pocket count", #Mock.created, 2)
+   eq("split/pocket first start",  Mock.created[1].pocket_data.StartDepth, 4)
+   eq("split/pocket second start", Mock.created[2].pocket_data.StartDepth, 7)
+   eq("split/pocket second depth", Mock.created[2].pocket_data.CutDepth, 2)
+end
+
+do -- tabs belong to the pass that reaches full depth, and to no other
+   run_split{ { name = "Profile_tool_2_depth_5_tabs_true_split_passes" } }
+
+   eq("split/tabs off on the first pass", Mock.created[1].profile_data.UseTabs, false)
+   eq("split/tabs on on the last pass",   Mock.created[2].profile_data.UseTabs, true)
+end
+
+do -- without the flag nothing changes, however deep the cut
+   run_split{ { name = "Profile_tool_2_depth_8" } }
+
+   eq("split/off: one toolpath", #Mock.created, 1)
+   eq("split/off: full depth", Mock.created[1].profile_data.CutDepth, 8)
+   eq("split/off: plain name", Mock.created[1].name, "Profile_tool_2_depth_8")
+end
+
+do -- a cut that fits in one pass is left as one plainly named toolpath
+   local _, _, _, plan = run_split{
+      { name = "Profile_tool_2_depth_3_split_passes" },
+      { name = "Profile_tool_2_depth_2_split_passes_false" },
+   }
+
+   eq("split/one pass: two layers, two toolpaths", #Mock.created, 2)
+   eq("split/one pass: plain name", Mock.created[1].name,
+      "Profile_tool_2_depth_3_split_passes")
+   eq("split/one pass: parts", plan[1].parts, 1)
+end
+
+do -- an operation that does not cut in passes ignores the flag, and says so
+   local created, _, log = run_split{ { name = "Drill_tool_4_depth_20_split_passes" } }
+
+   eq("split/drill not split", created, 1)
+   check("split/drill warned", log.counts.warn >= 1)
+end
+
+do -- a re-run with Replace clears the earlier passes, not just an exact name
+   local _, _, log = run_split({ { name = "Profile_tool_2_depth_5_split_passes" } },
+      function(ctx)
+         ctx.replace_existing = true
+         Mock.toolpaths[1] = { Name = "Profile_tool_2_depth_5_split_passes [1 of 2]" }
+         Mock.toolpaths[2] = { Name = "Profile_tool_2_depth_5_split_passes [2 of 2]" }
+         Mock.toolpaths[3] = { Name = "Someone_elses_toolpath" }
+      end)
+
+   eq("split/replace: old passes gone, new ones in", #Mock.toolpaths, 3)
+   eq("split/replace: the stranger survives", Mock.toolpaths[1].Name,
+      "Someone_elses_toolpath")
+   check("split/replace: new passes are this run's",
+         Mock.toolpaths[2].__id ~= nil and Mock.toolpaths[3].__id ~= nil)
+end
+
+do -- existing passes are counted under the layer's name before the run
+   local _, _, _, plan = run_split({ { name = "Profile_tool_2_depth_5_split_passes" } },
+      function()
+         Mock.toolpaths[1] = { Name = "Profile_tool_2_depth_5_split_passes [1 of 2]" }
+      end)
+
+   eq("split/survey sees an earlier pass", plan[1].existing, 1)
+end
+
+---------------------------------------------------------------------------
 -- report
 ---------------------------------------------------------------------------
 

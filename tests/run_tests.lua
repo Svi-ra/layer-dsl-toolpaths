@@ -260,6 +260,27 @@ do -- multi-token KEYS resolve by longest match, not first underscore
       "open")
 end
 
+do -- a FLAG is on by being named, and takes a value only if one is there
+   eq("flag/bare at the end",
+      parse("Profile_tool_9_depth_18.5_split_passes").split_passes, true)
+   eq("flag/depth untouched",
+      parse("Profile_tool_9_depth_18.5_split_passes").depth, 18.5)
+
+   local p = parse("Profile_tool_9_depth_18.5_split_passes_side_inside")
+   eq("flag/bare in the middle", p.split_passes, true)
+   eq("flag/does not swallow the next key", p.side, "inside")
+   eq("flag/nothing reported unknown", #p.unknown_parameters, 0)
+
+   eq("flag/explicit true",  parse("Profile_depth_8_split_passes_true").split_passes, true)
+   eq("flag/explicit false", parse("Profile_depth_8_split_passes_false").split_passes, false)
+   eq("flag/alias", parse("Pocket_depth_8_split").split_passes, true)
+
+   eq("flag/pipe form bare",  parse("Profile|tool=9|depth=18.5|split_passes").split_passes, true)
+   eq("flag/pipe form value", parse("Profile|depth=8|split_passes=false").split_passes, false)
+
+   is_nil("flag/absent means off", parse("Profile_tool_9_depth_18.5").split_passes)
+end
+
 do -- multi-token VALUES are held together by the enum vocabulary
    eq("dxf/rate_units mm_sec", parse("Pocket_rate_units_mm_sec").rate_units, "mm_sec")
    eq("dxf/rate_units in_min", parse("Pocket_rate_units_in_min").rate_units, "in_min")

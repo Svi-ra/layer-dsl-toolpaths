@@ -114,6 +114,92 @@ local function tool_numbers_of(params)
    return references
 end
 
+---------------------------------------------------------------------------
+-- split passes
+---------------------------------------------------------------------------
+
+--[[
+| `split_passes` in a layer name: one toolpath per pass.
+|
+| VCarve spreads a cut EVENLY over its passes - a 12 mm pass depth over 19 mm
+| cuts 9.5 + 9.5 - and the Lua API has no way to ask for "Maintain exact tool
+| pass depth". What it can do is cut a toolpath that is only one pass deep. So
+| a flagged layer becomes a stack of toolpaths, each starting where the last
+| one finished and cutting the tool's full pass depth, the final one cutting
+| whatever is left:
+|
+|     depth 19, pass depth 12   ->   0 to 12,  then 12 to 19
+|
+| No single toolpath is deeper than the pass depth, so VCarve has nothing to
+| spread, and the last one ends at exactly the depth the layer name gives.
+|
+| Without the flag, or when the cut already fits in one pass, the layer is one
+| toolpath built exactly as before.
+]]
+
+local SPLIT_OPERATIONS = { Profile = true, Pocket = true }
+local SPLIT_EPSILON    = 1e-6
+
+--- The toolpath name with any " [2 of 3]" part suffix removed.
+local function base_name(name)
+   if type(name) ~= "string" then return name end
+   return (name:gsub(" %[%d+ of %d+%]$", ""))
+end
+
+--- The parameter tables to build for one layer: one per pass when the layer
+--- asks for split passes, otherwise just the layer's own.
+--
+-- @param tools ToolRepository (may be nil: then nothing is split)
+-- @param in_mm whether the JOB is in millimetres
+local function pass_parts(params, tools, in_mm)
+   if not params.split_passes or not SPLIT_OPERATIONS[params.operation]
+      or tools == nil
+   then
+      return { params }
+   end
+
+   local record = tools:find(params.tool)
+   if record == nil then return { params } end
+
+   -- The same pass depth the tool is built with: the library's, unless the
+   -- layer name overrode it. It is in the TOOL's units; depths are in the job's.
+   local stepdown = tonumber(record.stepdown)
+   if (params.explicit or {}).pass_depth then stepdown = params.pass_depth end
+   if type(stepdown) ~= "number" or stepdown <= 0 then return { params } end
+
+   local tool_in_mm = Tooling.record_in_mm(record)
+   if tool_in_mm and in_mm == false then stepdown = stepdown / 25.4 end
+   if not tool_in_mm and in_mm ~= false then stepdown = stepdown * 25.4 end
+
+   local depth = params.depth or 0
+   if depth <= stepdown + SPLIT_EPSILON then return { params } end
+
+   local count = math.ceil((depth - SPLIT_EPSILON) / stepdown)
+   local parts = {}
+
+   for k = 1, count do
+      local part = {}
+      for key, value in pairs(params) do part[key] = value end
+
+      local cut_so_far = (k - 1) * stepdown
+      part.start_depth = (params.start_depth or 0) + cut_so_far
+      part.depth       = math.min(stepdown, depth - cut_so_far)
+
+      -- A tab is measured up from the bottom of the cut it belongs to, so
+      -- only the pass that reaches full depth may leave one.
+      if k < count then part.tabs = false end
+
+      if params.toolpath_name ~= nil then
+         part.toolpath_name = string.format("%s [%d of %d]",
+                                            params.toolpath_name, k, count)
+      end
+
+      parts[k] = part
+   end
+
+   return parts
+end
+
 --- The distinct tools a whole plan needs, sorted for stable display.
 function Runner.required_tools(plan)
    local seen, out = {}, {}
@@ -279,7 +365,9 @@ function Runner.survey_existing(plan, manager)
       local toolpath
       toolpath, pos = manager:GetNext(pos)
       if toolpath ~= nil and toolpath.Name ~= nil then
-         counts[toolpath.Name] = (counts[toolpath.Name] or 0) + 1
+         -- The passes of a split layer count under the layer's own name.
+         local name = base_name(toolpath.Name)
+         counts[name] = (counts[name] or 0) + 1
       end
    end
 
@@ -297,11 +385,17 @@ function Runner.survey_existing(plan, manager)
 end
 
 --- Resolve the tools a plan entry uses, for display in the plan table.
-function Runner.annotate_tools(plan, tools)
+--
+-- Also records how many toolpaths each layer will become (`entry.parts`), so
+-- the dialog can say what a split_passes layer is about to create.
+--
+-- @param in_mm whether the job is in millimetres
+function Runner.annotate_tools(plan, tools, in_mm)
    for i = 1, #plan do
       local entry = plan[i]
       local record = tools:find(entry.params.tool)
       entry.tool_label = record and Tools.describe(record) or nil
+      entry.parts = #pass_parts(entry.params, tools, in_mm)
    end
    return plan
 end
@@ -326,8 +420,13 @@ end
 --
 -- Without sheets - an unsheeted job - every toolpath is by definition on the
 -- only sheet there is, and matching by name is exact again.
+--
+-- The passes of a split_passes layer ("name [1 of 2]") belong to the layer's
+-- name too, so replacing a layer clears them whether or not this run splits it.
 local function delete_existing(manager, name, sheets, sheet_name)
-   if not manager:ToolpathWithNameExists(name) then return 0, 0 end
+   local function named(toolpath)
+      return toolpath ~= nil and base_name(toolpath.Name) == name
+   end
 
    local function mine(toolpath)
       if sheets == nil or sheet_name == nil then return true end
@@ -345,7 +444,7 @@ local function delete_existing(manager, name, sheets, sheet_name)
       while pos ~= nil do
          local toolpath
          toolpath, pos = manager:GetNext(pos)
-         if toolpath ~= nil and toolpath.Name == name and mine(toolpath) then
+         if named(toolpath) and mine(toolpath) then
             manager:DeleteToolpath(toolpath)
             removed = removed + 1
             again = true
@@ -364,7 +463,7 @@ local function delete_existing(manager, name, sheets, sheet_name)
    while pos ~= nil do
       local toolpath
       toolpath, pos = manager:GetNext(pos)
-      if toolpath ~= nil and toolpath.Name == name then spared = spared + 1 end
+      if named(toolpath) then spared = spared + 1 end
    end
 
    return removed, spared
@@ -577,45 +676,49 @@ function Runner.execute(plan, config, ctx, log)
                entry.existing, params.toolpath_name))
          end
 
-         local id, err, warnings = Factory.build(params, ctx)
+         -- One toolpath, or one per pass for a split_passes layer. Built in
+         -- cutting order, shallowest first, so they are machined in it too.
+         for _, part in ipairs(pass_parts(params, ctx.tools, ctx.in_mm)) do
+            local id, err, warnings = Factory.build(part, ctx)
 
-         for _, warning in ipairs(warnings or {}) do
-            log:warn(label, warning)
-         end
+            for _, warning in ipairs(warnings or {}) do
+               log:warn(label, warning)
+            end
 
-         if id == nil then
-            failed = failed + 1
-            log:error(label, err or "toolpath creation failed")
-         else
-            created = created + 1
-            log:info(label, string.format(
-               "created %q (%s, tool %s, depth %.3g)%s",
-               params.toolpath_name, params.operation,
-               tostring(params.tool), params.depth or 0,
-               ctx.sheet_name and (" on sheet " .. ctx.sheet_name) or ""))
+            if id == nil then
+               failed = failed + 1
+               log:error(label, err or "toolpath creation failed")
+            else
+               created = created + 1
+               log:info(label, string.format(
+                  "created %q (%s, tool %s, depth %.3g)%s",
+                  part.toolpath_name, part.operation,
+                  tostring(part.tool), part.depth or 0,
+                  ctx.sheet_name and (" on sheet " .. ctx.sheet_name) or ""))
 
-            --[[
-            | Immediately, and on this sheet. Recalculation is done here
-            | rather than in one sweep at the end because in a nested job the
-            | run walks the sheets, and a toolpath is calculated against the
-            | ACTIVE sheet - recalculating it later, with a different sheet
-            | active, is not the same operation.
-            ]]
-            if recalculating then
-               local done, why = recalculate(manager, id, params.toolpath_name)
-               if done then
-                  recalculated = recalculated + 1
-                  ctx.recalculated = (ctx.recalculated or 0) + 1
-               elseif not ctx.recalculation_warned then
-                  -- Once per run. The cause is the same for every toolpath,
-                  -- so a line each would bury the rest of the report.
-                  ctx.recalculation_warned = true
-                  log:warn(label, string.format(
-                     "could not run the calculation stage on the new toolpaths "
-                     .. "(%s); settings that only take effect on calculation - "
-                     .. "keep_start_points above all - will not be applied "
-                     .. "until you select the toolpaths in VCarve and press "
-                     .. "Calculate", why))
+               --[[
+               | Immediately, and on this sheet. Recalculation is done here
+               | rather than in one sweep at the end because in a nested job
+               | the run walks the sheets, and a toolpath is calculated against
+               | the ACTIVE sheet - recalculating it later, with a different
+               | sheet active, is not the same operation.
+               ]]
+               if recalculating then
+                  local done, why = recalculate(manager, id, part.toolpath_name)
+                  if done then
+                     recalculated = recalculated + 1
+                     ctx.recalculated = (ctx.recalculated or 0) + 1
+                  elseif not ctx.recalculation_warned then
+                     -- Once per run. The cause is the same for every toolpath,
+                     -- so a line each would bury the rest of the report.
+                     ctx.recalculation_warned = true
+                     log:warn(label, string.format(
+                        "could not run the calculation stage on the new toolpaths "
+                        .. "(%s); settings that only take effect on calculation - "
+                        .. "keep_start_points above all - will not be applied "
+                        .. "until you select the toolpaths in VCarve and press "
+                        .. "Calculate", why))
+                  end
                end
             end
          end
@@ -737,6 +840,9 @@ function Runner.plan_to_html(plan)
          end
          if params.side then bits[#bits + 1] = params.side end
          if params.tabs then bits[#bits + 1] = "tabs" end
+         if (entry.parts or 1) > 1 then
+            bits[#bits + 1] = string.format("split into %d passes", entry.parts)
+         end
          if (params.flat_depth or 0) > 0 then
             bits[#bits + 1] = string.format("flat %.3g", params.flat_depth)
          end

@@ -311,6 +311,7 @@ library behind.
 | `operation` | — | string | all | — | Operation to run. Normally the first field of the layer name. |
 | `tool` | `bit`, `cutter`, `tool_no`, `toolnum`, `tn` | id or name | all | `1` | **Tool id** (or name) in `tools.json`. |
 | `pass_depth` | `stepdown`, `step_down`, `doc`, `depth_per_pass` | number (≥0.001) | all | *library* | Cut depth per pass (tool stepdown). |
+| `split_passes` | `split` | flag | Profile, Pocket | off | One toolpath per pass, each the tool's full pass depth. See [Split passes](#split-passes). |
 | `stepover` | `pover`, `step_over`, `so` | number (0.1–100) | all | *library* | Stepover as a PERCENTAGE of tool diameter. |
 | `feed` | `feed_rate`, `feedrate`, `f` | number (≥0.001) | all | *library* | Cutting feed rate, in `rate_units`. |
 | `plunge` | `plunge_rate`, `plungerate` | number (≥0.001) | all | *library* | Plunge feed rate, in `rate_units`. |
@@ -435,6 +436,40 @@ toolpaths need a manual Calculate.
 
 Cost: every toolpath is calculated twice. `recalculate = false` buys that time
 back and hands you the manual Calculate step instead.
+
+### Split passes
+
+VCarve spreads a cut **evenly** over its passes: a tool with a 12 mm pass depth
+cutting 19 mm deep makes two passes of 9.5, not 12 then 7. The Edit Passes
+dialog can change that ("Maintain exact tool pass depth"); the Lua API cannot.
+
+Add the bare flag `split_passes` to a layer name and the gadget builds **one
+toolpath per pass** instead, each starting where the previous one finished:
+
+```
+Profile_tool_9_depth_19_split_passes
+```
+
+| Toolpath | Cuts from | Cuts to |
+|---|---|---|
+| `Profile_tool_9_depth_19_split_passes [1 of 2]` | 0 | 12 — the tool's pass depth |
+| `Profile_tool_9_depth_19_split_passes [2 of 2]` | 12 | 19 — the depth in the layer name |
+
+No toolpath is deeper than one pass, so VCarve has nothing to spread. A deeper
+cut simply gets more toolpaths (30 mm → 0–12, 12–24, 24–30). They are created
+in cutting order, shallowest first.
+
+- The pass depth is the tool database's, or `pass_depth` from the layer name.
+- The flag needs no value and can sit anywhere after the operation;
+  `split_passes_false` switches it off again. In the pipe form it is
+  `Profile|tool=9|depth=19|split_passes`.
+- A cut that already fits in one pass stays a single, plainly named toolpath.
+- `tabs` are left only by the last toolpath — the one that reaches full depth.
+- Profile and Pocket only; on Drill or VCarve the flag is ignored with a warning.
+- In a two-tool pocket the split follows the pocket tool's pass depth.
+- Replacing existing toolpaths clears a layer's earlier `[n of m]` toolpaths too.
+
+Without the flag nothing changes: one toolpath per layer, VCarve's own passes.
 
 ### If the start points ever stop being optimised
 
